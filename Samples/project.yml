@@ -1,0 +1,47 @@
+name: ARTrackerDemos
+options:
+  bundleIdPrefix: id.art.tracker
+  deploymentTarget:
+    iOS: "15.0"
+
+packages:
+  ARTracker:
+    path: ../
+  Wormholy:
+    url: https://github.com/Alfagift/Wormholy.git
+    branch: enable-spm
+
+targets:
+  ARTrackerDemoSwiftUI:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - ARTrackerDemoSwiftUI
+    dependencies:
+      - package: ARTracker
+      - package: Wormholy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: id.art.tracker
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 1.0.0
+
+  ARTrackerDemoUIKit:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - ARTrackerDemoUIKit
+    dependencies:
+      - package: ARTracker
+      - package: Wormholy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: id.art.tracker.uikit
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 1.0.0
