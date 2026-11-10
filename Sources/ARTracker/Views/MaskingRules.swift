@@ -15,8 +15,21 @@ public struct MaskingRules: Sendable {
             return true
         }
 
-        if let tf = view as? UITextField, tf.isSecureTextEntry {
-            return true
+        if let tf = view as? UITextField {
+            if tf.isSecureTextEntry { return true }
+            if let ct = tf.textContentType {
+                if ct == .password || ct == .newPassword || ct == .oneTimeCode || ct == .creditCardNumber {
+                    return true
+                }
+            }
+        }
+
+        if let tv = view as? UITextView {
+            if let ct = tv.textContentType {
+                if ct == .password || ct == .newPassword || ct == .oneTimeCode || ct == .creditCardNumber {
+                    return true
+                }
+            }
         }
 
         if let id = view.accessibilityIdentifier, id.hasPrefix("mask:") {

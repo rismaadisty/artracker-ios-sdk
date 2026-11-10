@@ -171,6 +171,16 @@ public final class ARTracker: @unchecked Sendable {
         self._uploader = uploader
         uploader.start()
 
+        // 8.1 Start Session Replay Engine if enabled
+        if config.enableSessionReplay {
+            ReplayEngine.shared.start(
+                endpoint: endpoint,
+                appKey: appKey,
+                environment: config.environment,
+                maskAllText: config.maskAllText
+            )
+        }
+
         // 9. API Key Early Validation (GAP-06)
         validateAPIKey(endpoint: endpoint, appKey: appKey, uploader: uploader)
 
@@ -415,6 +425,7 @@ public final class ARTracker: @unchecked Sendable {
         }
 
         let msg = message ?? error.localizedDescription
+        ReplayEngine.shared.markError()
         let item = Item(
             type: .log,
             name: "error",
@@ -428,6 +439,7 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     public static func flush(completion: (@Sendable () -> Void)? = nil) {
+        ReplayEngine.shared.flush()
         shared._uploader?.flush(completion: completion)
     }
 
@@ -467,6 +479,10 @@ public final class ARTracker: @unchecked Sendable {
             }
         }
 
+        if let config = _config, config.enableSessionReplay {
+            ReplayEngine.shared.captureFullSnapshot(triggerReason: "screen.view", screenName: name)
+        }
+
         BreadcrumbStore.shared.add(
             Breadcrumb(type: "navigation", category: "ui", message: "screen.view \(name)")
         )
@@ -503,6 +519,7 @@ public final class ARTracker: @unchecked Sendable {
         enqueueItem(sessionEndItem)
 
         TerminationDetector.shared.setInForeground(false)
+        ReplayEngine.shared.flush()
         _uploader?.suspendTimer()
         _uploader?.flush()
     }

@@ -15,6 +15,9 @@ public struct ARTrackerConfig: Sendable {
     /// Automatically capture screen appearances (UIViewController / SwiftUI). Default: true.
     public var enableViewCapture: Bool
 
+    /// Automatically record session replay wireframe stream. Default: true.
+    public var enableSessionReplay: Bool
+
     /// Mask all text fields in captured view hierarchy. Default: false.
     public var maskAllText: Bool
 
@@ -44,6 +47,7 @@ public struct ARTrackerConfig: Sendable {
         appVersion: String? = nil,
         enableNetworkCapture: Bool = true,
         enableViewCapture: Bool = true,
+        enableSessionReplay: Bool = true,
         maskAllText: Bool = false,
         wifiOnly: Bool = false,
         maxBreadcrumbs: Int = 50,
@@ -57,6 +61,7 @@ public struct ARTrackerConfig: Sendable {
         self.appVersion = appVersion.map { String($0.prefix(64)) }
         self.enableNetworkCapture = enableNetworkCapture
         self.enableViewCapture = enableViewCapture
+        self.enableSessionReplay = enableSessionReplay
         self.maskAllText = maskAllText
         self.wifiOnly = wifiOnly
         self.maxBreadcrumbs = max(10, min(maxBreadcrumbs, 200))
