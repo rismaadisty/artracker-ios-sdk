@@ -3,6 +3,48 @@ import Foundation
 import UIKit
 #endif
 
+import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
+
+/// Remote configuration response for session replay mode and limits.
+public struct ReplayRemoteConfig: Codable, Sendable {
+    public let screenshotEnabled: Bool
+    public let maxFps: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case screenshotEnabled = "screenshot_enabled"
+        case maxFps = "max_fps"
+    }
+
+    public init(screenshotEnabled: Bool, maxFps: Double? = nil) {
+        self.screenshotEnabled = screenshotEnabled
+        self.maxFps = maxFps
+    }
+}
+
+/// Errors occurring during replay chunk upload negotiation and delivery.
+public enum ReplayUploadError: Error, Sendable, LocalizedError {
+    case screenshotDisabled
+    case httpError(statusCode: Int, message: String?, retryAfter: TimeInterval?)
+    case networkError(String)
+    case invalidResponse
+
+    public var errorDescription: String? {
+        switch self {
+        case .screenshotDisabled:
+            return "Screenshot replay is disabled on server"
+        case .httpError(let code, let msg, _):
+            return "HTTP Error \(code): \(msg ?? "Unknown")"
+        case .networkError(let desc):
+            return "Network Error: \(desc)"
+        case .invalidResponse:
+            return "Invalid server response format"
+        }
+    }
+}
+
 /// Network uploader for replay chunks.
 /// Uses an isolated ephemeral URLSession that bypasses ARTrackerURLProtocol to prevent infinite loops.
 public final class ReplayUploader: @unchecked Sendable {
@@ -22,6 +64,47 @@ public final class ReplayUploader: @unchecked Sendable {
         self.session = URLSession(configuration: config)
     }
 
+    /// Fetches server-side replay configuration (e.g. screenshot switch and max fps).
+    public func fetchReplayConfig(
+        completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void
+    ) {
+        var url = endpoint
+        if !url.path.hasSuffix("/api/v1/replay/config") {
+            url = url.appendingPathComponent("api/v1/replay/config")
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue(appKey, forHTTPHeaderField: "X-Artracker-Key")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let task = session.dataTask(with: req) { data, response, error in
+            if let error = error {
+                completion(.failure(ReplayUploadError.networkError(error.localizedDescription)))
+                return
+            }
+
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(ReplayUploadError.invalidResponse))
+                return
+            }
+
+            guard (200...299).contains(http.statusCode), let data = data else {
+                let msg = data.flatMap { String(data: $0, encoding: .utf8) }
+                completion(.failure(ReplayUploadError.httpError(statusCode: http.statusCode, message: msg, retryAfter: nil)))
+                return
+            }
+
+            do {
+                let config = try JSONDecoder().decode(ReplayRemoteConfig.self, from: data)
+                completion(.success(config))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+        task.resume()
+    }
+
     /// Step 1: Request presigned chunk upload URL
     public func requestChunkUrl(
         sessionId: String,
@@ -30,6 +113,7 @@ public final class ReplayUploader: @unchecked Sendable {
         userId: String?,
         environment: String,
         startTime: String,
+        format: String = "artracker-mobile-v1",
         completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
     ) {
         var url = endpoint
@@ -47,7 +131,8 @@ public final class ReplayUploader: @unchecked Sendable {
             "chunk_seq": chunkSeq,
             "size_bytes": sizeBytes,
             "environment": environment,
-            "start_time": startTime
+            "start_time": startTime,
+            "format": format
         ]
         if let uid = userId {
             bodyDict["user_id"] = uid
@@ -64,9 +149,25 @@ public final class ReplayUploader: @unchecked Sendable {
                 completion(.failure(error))
                 return
             }
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), let data = data else {
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                completion(.failure(NSError(domain: "ARTrackerReplay", code: code, userInfo: [NSLocalizedDescriptionKey: "Failed chunk-url request (HTTP \(code))"])))
+
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? -1
+
+            if statusCode == 403 {
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let errStr = json["error"] as? String,
+                   errStr == "screenshot_disabled" {
+                    completion(.failure(ReplayUploadError.screenshotDisabled))
+                    return
+                }
+            }
+
+            guard let http = http, (200...299).contains(http.statusCode), let data = data else {
+                let msg = data.flatMap { String(data: $0, encoding: .utf8) }
+                let retryAfterStr = http?.value(forHTTPHeaderField: "Retry-After")
+                let retrySeconds = retryAfterStr.flatMap { Double($0) }
+                completion(.failure(ReplayUploadError.httpError(statusCode: statusCode, message: msg, retryAfter: retrySeconds)))
                 return
             }
 

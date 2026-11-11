@@ -177,7 +177,10 @@ public final class ARTracker: @unchecked Sendable {
                 endpoint: endpoint,
                 appKey: appKey,
                 environment: config.environment,
-                maskAllText: config.maskAllText
+                maskAllText: config.maskAllText,
+                wifiOnly: config.wifiOnly,
+                quality: config.replayQuality,
+                fps: config.replayFramesPerSecond
             )
         }
 
