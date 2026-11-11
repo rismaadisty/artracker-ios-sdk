@@ -3,7 +3,8 @@ import Foundation
 import UIKit
 #endif
 
-/// Main Replay Engine orchestrating WireframeCrawler, TouchTracker, and ReplayChunkManager.
+/// Main Replay Engine orchestrating ScreenCapturer, TouchTracker, and ReplayChunkManager
+/// for high-fidelity visual session replays (`artracker-screen-v1`).
 public final class ReplayEngine: @unchecked Sendable {
     public static let shared = ReplayEngine()
 
@@ -11,31 +12,115 @@ public final class ReplayEngine: @unchecked Sendable {
     private var chunkManager: ReplayChunkManager?
     private var isStarted: Bool = false
     private var maskAllText: Bool = false
-    private var lastCapturedTree: MobileViewNode?
-    private var lastSnapshotUptime: TimeInterval = 0
-    private var pendingDebounceWorkItem: DispatchWorkItem?
 
-    private let workerQueue = DispatchQueue(label: "com.artracker.replay.engine", qos: .utility)
+    #if canImport(UIKit)
+    @MainActor private var screenCapturer: ScreenCapturer?
+    #endif
+
+    private var pendingDebounceWorkItem: DispatchWorkItem?
 
     private init() {}
 
-    public func start(endpoint: URL, appKey: String, environment: String, maskAllText: Bool) {
+    public func start(
+        endpoint: URL,
+        appKey: String,
+        environment: String,
+        maskAllText: Bool,
+        wifiOnly: Bool = false,
+        quality: ReplayQuality = .standard,
+        fps: Double = 2.0
+    ) {
+        let uploader = ReplayUploader(endpoint: endpoint, appKey: appKey)
+        let diskQueue = ReplayDiskQueue()
+        let mgr = ReplayChunkManager(
+            uploader: uploader,
+            environment: environment,
+            wifiOnly: wifiOnly,
+            diskQueue: diskQueue
+        )
+
         lock.withLock {
             guard !isStarted else { return }
             isStarted = true
             self.maskAllText = maskAllText
+            self.chunkManager = mgr
+        }
 
-            let uploader = ReplayUploader(endpoint: endpoint, appKey: appKey)
-            self.chunkManager = ReplayChunkManager(uploader: uploader, environment: environment)
+        mgr.onScreenshotDisabled = { [weak self] in
+            UserDefaults.standard.set(false, forKey: "artracker.replay.screenshot_enabled")
+            #if canImport(UIKit)
+            Task { @MainActor [weak self] in
+                self?.screenCapturer?.stop()
+            }
+            #endif
         }
 
         #if canImport(UIKit)
+        mgr.onBudgetGovernorAlert = { [weak self] shouldHalveFps, shouldStepDownQuality in
+            Task { @MainActor in
+                guard let capturer = self?.screenCapturer else { return }
+                if shouldHalveFps {
+                    capturer.updateFpsCap(max(0.5, capturer.effectiveFps / 2.0))
+                }
+                if shouldStepDownQuality {
+                    capturer.quality = capturer.quality.lowerPreset
+                }
+            }
+        }
+
         DispatchQueue.main.async { [weak self] in
-            self?.setupTouchTracking()
-            self?.setupWindowObserver()
-            self?.attemptInitialCapture()
+            guard let self = self else { return }
+
+            let capturer = ScreenCapturer(
+                quality: quality,
+                fps: fps,
+                maskAllText: maskAllText
+            )
+            capturer.onFrameCaptured = { [weak self] frame in
+                self?.chunkManager?.appendScreenFrame(frame)
+            }
+            self.screenCapturer = capturer
+            capturer.start()
+            capturer.captureImmediate(triggerReason: "session.start")
+
+            self.setupTouchTracking()
+            self.setupWindowObserver()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                Task { @MainActor in
+                    self?.screenCapturer?.captureImmediate(triggerReason: "session.start.delayed")
+                }
+            }
         }
         #endif
+
+        // Fetch remote config asynchronously to resolve server-side max fps or switch
+        uploader.fetchReplayConfig { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let config):
+                UserDefaults.standard.set(config.screenshotEnabled, forKey: "artracker.replay.screenshot_enabled")
+                #if canImport(UIKit)
+                DispatchQueue.main.async {
+                    if let maxFps = config.maxFps {
+                        self.screenCapturer?.updateFpsCap(maxFps)
+                    }
+                    if !config.screenshotEnabled {
+                        self.screenCapturer?.stop()
+                    }
+                }
+                #endif
+            case .failure(let error):
+                if case ReplayUploadError.screenshotDisabled = error {
+                    UserDefaults.standard.set(false, forKey: "artracker.replay.screenshot_enabled")
+                    #if canImport(UIKit)
+                    DispatchQueue.main.async {
+                        self.screenCapturer?.stop()
+                    }
+                    #endif
+                }
+            }
+        }
     }
 
     public func markError() {
@@ -54,53 +139,38 @@ public final class ReplayEngine: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.captureFullSnapshot(triggerReason: "window.didBecomeKey")
+                self?.screenCapturer?.captureImmediate(triggerReason: "window.didBecomeKey")
             }
-        }
-    }
-
-    private func attemptInitialCapture() {
-        Task { @MainActor in
-            self.captureFullSnapshot(triggerReason: "session.start")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            Task { @MainActor in
-                self?.captureFullSnapshot(triggerReason: "session.start.delayed")
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.flush()
         }
     }
 
     private func setupTouchTracking() {
-        TouchTracker.shared.start { [weak self] point, isRageTap in
+        TouchTracker.shared.start { [weak self] point, kind, isRageTap in
             guard let self = self else { return }
 
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-            let touch = MobileTouchPoint(
+            let touch = ScreenTouchPoint(
                 ts: nowMs,
                 x: Double(point.x),
                 y: Double(point.y),
-                name: isRageTap ? "touch.rage_tap" : "touch.tap"
+                kind: kind
             )
-
-            self.chunkManager?.appendTouch(touch)
+            self.chunkManager?.appendScreenTouch(touch)
             if isRageTap {
                 self.chunkManager?.markRageClick()
             }
-
-            // Debounce crawl 300ms after touch interaction to capture resulting UI transitions
-            self.scheduleDebouncedCrawl()
+            if kind == "down" || kind == "up" {
+                self.scheduleDebouncedScreenshot()
+            }
         }
     }
 
-    public func scheduleDebouncedCrawl() {
+    public func scheduleDebouncedScreenshot() {
         lock.withLock {
             pendingDebounceWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 Task { @MainActor in
-                    self?.captureFullSnapshot(triggerReason: "touch.debounce")
+                    self?.screenCapturer?.captureImmediate(triggerReason: "touch.debounce")
                 }
             }
             pendingDebounceWorkItem = workItem
@@ -110,64 +180,10 @@ public final class ReplayEngine: @unchecked Sendable {
 
     @MainActor
     public func captureFullSnapshot(triggerReason: String, screenName: String? = nil) {
-        let nowUptime = ProcessInfo.processInfo.systemUptime
-        let shouldThrottle = lock.withLock {
-            if nowUptime - lastSnapshotUptime < 0.4 { return true }
-            lastSnapshotUptime = nowUptime
-            return false
+        if let name = screenName {
+            screenCapturer?.setScreenName(name)
         }
-        if shouldThrottle { return }
-
-        // Cari window aktif: prioritaskan isKeyWindow, fallback ke window pertama yang terlihat
-        let allWindows = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .flatMap({ $0.windows })
-
-        guard let window = allWindows.first(where: { $0.isKeyWindow })
-            ?? allWindows.first(where: { !$0.isHidden })
-            ?? allWindows.first else {
-            return
-        }
-
-        let mask = self.maskAllText
-
-        // Stage 1: Fast primitive extraction (< 1.5ms) on MainActor
-        let (tree, maskedCount) = WireframeCrawler.shared.captureWindowTree(
-            window: window,
-            maskAllText: mask
-        )
-
-        let rootName = window.rootViewController.map { String(describing: type(of: $0)) } ?? "MainScreen"
-        let resolvedScreen = screenName ?? rootName
-        let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
-
-        // Stage 2: Background processing
-        workerQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            // Deduplication check: if tree is identical to previous snapshot, skip
-            let isIdentical = self.lock.withLock {
-                if self.lastCapturedTree == tree {
-                    return true
-                }
-                self.lastCapturedTree = tree
-                return false
-            }
-
-            if isIdentical && triggerReason != "session.start" && triggerReason != "session.start.delayed" {
-                return
-            }
-
-            let frame = MobileFramePayload(
-                ts: timestampMs,
-                screen: resolvedScreen,
-                presentation: "push",
-                maskedCount: maskedCount,
-                viewTree: tree
-            )
-
-            self.chunkManager?.appendFrame(frame)
-        }
+        screenCapturer?.captureImmediate(triggerReason: triggerReason)
     }
     #endif
 }
