@@ -139,6 +139,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 | `flushInterval` | `TimeInterval`| `30.0` | Interval berkala (detik) pengiriman batch item dari disk queue ke backend. |
 | `maxBatchItems` | `Int` | `50` | Maksimum item yang digabungkan dalam satu request upload (maks 100). |
 | `debugLogging` | `Bool` | `false` | Menampilkan log internal SDK via OSLog di console debugger. |
+| `enablePerformanceMonitoring` | `Bool` | `false` | Mengaktifkan sampling performa foreground (CPU, RAM, FPS, jank, threads, thermal). |
+| `performanceSampleInterval` | `TimeInterval` | `1.0` | Interval sampling performa dalam detik (di-clamp `0.5...10.0`). |
 
 ---
 
@@ -216,7 +218,38 @@ ARTracker.flush {
 }
 ```
 
-### 5. Debugger & Crash Handling Safety
+### 5. Performance monitoring
+
+Pemantauan performa bersifat **opt-in** (`enablePerformanceMonitoring: false` secara default). Saat diaktifkan, SDK melakukan sampling hanya ketika aplikasi berada di foreground (dihentikan otomatis saat `didEnterBackground`), tanpa memperpanjang masa aktif idle session:
+
+```swift
+let config = ARTrackerConfig(
+    environment: "production",
+    enablePerformanceMonitoring: true,
+    performanceSampleInterval: 1.0 // detik, rentang valid 0.5...10.0
+)
+```
+
+| Metrik / Event | Sumber | Keterangan |
+|---|---|---|
+| `cpu` | Mach `task_threads` (`thread_basic_info`) | Persentase CPU proses terhadap total active cores (`0...100`), di-omit pada sampel baseline pertama. |
+| `mem_mb` | Mach `task_info(TASK_VM_INFO).phys_footprint` | Jejak memori fisik proses dalam MB (selaras dengan Xcode Memory Gauge & Jetsam). |
+| `fps` | `CADisplayLink` | Frame rate rata-rata dalam interval (di-omit jika `< 2` callback frame). |
+| `jank` | `CADisplayLink` | Jumlah interval frame dengan `dt > 2 × max(prevExpected, expected)`. |
+| `frozen` | `CADisplayLink` | Jumlah interval frame dengan `dt > 0.7` detik. |
+| `threads` | Mach `task_threads` | Jumlah thread aktif proses saat sampling. |
+| `thermal` | `ProcessInfo.thermalState` | Salah satu dari `"nominal"`, `"fair"`, `"serious"`, `"critical"`. |
+| `ram_free_mb` | Mach `host_statistics64` | Perkiraan sisa RAM sistem (`free + inactive + speculative` pages) dalam MB (bukan headroom per-app `os_proc_available_memory`). |
+| `storage_free_mb` | Volume home directory | Sisa ruang penyimpanan yang tersedia dalam MB (`volumeAvailableCapacityForImportantUsageKey` / fallback `volumeAvailableCapacityKey`). |
+| `net` | `NWPathMonitor` (`Reachability`) | Tipe koneksi aktif: `"wifi"`, `"cellular"`, `"ethernet"`, atau `"none"` (di-omit jika belum terdeteksi / tipe lain). |
+| `perf.thermal_change` | Event (`.event`) | Dikirim saat status thermal berubah (`{ "from", "to" }`). |
+| `perf.memory_warning` | Event (`.event`) | Dikirim saat menerima `UIApplication.didReceiveMemoryWarningNotification`. |
+
+Metadata `device` pada item `perf.samples` (bukan `session.start`) juga menyertakan `os_version` (format `major.minor` atau `major.minor.patch`), `ram_mb`, `storage_mb`, `cores`, dan `refresh_hz`. Field yang gagal terbaca atau tidak tersedia akan di-omit dari payload.
+
+> **Catatan Baterai & ProMotion (120 Hz):** `DisplayLinkFrameSource` mengonfigurasi `preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: Float(maxFPS), preferred: 0)` agar iOS tetap dapat menurunkan refresh rate di layar statis saat profiling aktif.
+
+### 6. Debugger & Crash Handling Safety
 
 SDK dilengkapi mekanisme keamanan **`DebuggerDetector`**:
 * Saat aplikasi dijalankan langsung dari Xcode (`⌘R`), handler Mach dari `PLCrashReporter` otomatis di-bypass agar tidak memicu `SIGTRAP` (Signal 5) akibat bentrokan port exception dengan debugger LLDB.

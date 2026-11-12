@@ -4,6 +4,7 @@ public enum ItemType: String, Codable, Sendable {
     case event
     case log
     case session
+    case perf
 }
 
 public enum ItemLevel: String, Codable, Sendable {

@@ -81,6 +81,12 @@ public struct ARTrackerConfig: Sendable {
     /// Enable verbose SDK internal logging for debugging. Default: false.
     public var debugLogging: Bool
 
+    /// Enable foreground CPU, memory, frame rate, and thermal sampling. Default: false.
+    public var enablePerformanceMonitoring: Bool
+
+    /// Sampling interval in seconds for performance profiling. Clamped 0.5...10.0, default: 1.0.
+    public var performanceSampleInterval: TimeInterval
+
     public init(
         environment: String = "production",
         appVersion: String? = nil,
@@ -96,7 +102,9 @@ public struct ARTrackerConfig: Sendable {
         flushInterval: TimeInterval = 30.0,
         sampleRate: Double = 1.0,
         instrumentAllSessions: Bool = false,
-        debugLogging: Bool = false
+        debugLogging: Bool = false,
+        enablePerformanceMonitoring: Bool = false,
+        performanceSampleInterval: TimeInterval = 1.0
     ) {
         self.environment = String(environment.prefix(64))
         self.appVersion = appVersion.map { String($0.prefix(64)) }
@@ -113,6 +121,8 @@ public struct ARTrackerConfig: Sendable {
         self.sampleRate = max(0.0, min(sampleRate, 1.0))
         self.instrumentAllSessions = instrumentAllSessions
         self.debugLogging = debugLogging
+        self.enablePerformanceMonitoring = enablePerformanceMonitoring
+        self.performanceSampleInterval = max(0.5, min(performanceSampleInterval, 10.0))
     }
 }
 

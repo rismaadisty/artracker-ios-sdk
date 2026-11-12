@@ -23,7 +23,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 maskAllText: false,
                 wifiOnly: false,
                 flushInterval: 5,
-                debugLogging: true
+                debugLogging: true,
+                enablePerformanceMonitoring: true
             )
         )
 

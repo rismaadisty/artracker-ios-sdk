@@ -105,5 +105,102 @@ final class GoldenJSONTests: XCTestCase {
         let encoded = try JSONEncoder().encode(item.attributes)
         XCTAssertLessThanOrEqual(encoded.count, 32_768, "Attributes must not exceed backend 32KB hard limit")
     }
+
+    func testPerfSamplesItemMatchesWireContract() throws {
+        final class State: @unchecked Sendable {
+            var cpuMs: Double = 0
+            var uptimeMs: Double = 1000
+            var nowMs: Int64 = 1_731_300_000_000
+            var items: [Item] = []
+        }
+        let state = State()
+        let queue = DispatchQueue(label: "test.golden.perf")
+
+        let probe = ProcessProbe(
+            cpuTimeMs: {
+                let current = state.cpuMs
+                state.cpuMs += 1500 // next sample: 1500ms / (1000ms * 6 cores) * 100 = 25%
+                return current
+            },
+            threadCount: { 14 },
+            footprintBytes: { 209_715_200 },
+            thermal: { .nominal },
+            ramFreeMb: { 2048 },
+            storageFreeMb: { 98_304 },
+            net: { "wifi" },
+            cores: 6
+        )
+        let sampler = PerfSampler(
+            probe: probe,
+            frames: nil,
+            nowMs: {
+                let t = state.nowMs
+                state.nowMs += 1000
+                return t
+            },
+            uptimeMs: {
+                let u = state.uptimeMs
+                state.uptimeMs += 1000
+                return u
+            }
+        )
+        let monitor = PerfMonitor(
+            sampler: sampler,
+            intervalMs: 1000,
+            device: {
+                PerfDevice(
+                    ramMb: 6144,
+                    storageMb: 244_140,
+                    osVersion: "26.4",
+                    cores: 6,
+                    refreshHz: 120
+                )
+            },
+            sessionId: { "ses_golden123" },
+            userId: { nil },
+            enqueue: { state.items.append($0) },
+            queue: queue
+        )
+
+        monitor.tick()
+        monitor.tick()
+        monitor.flush()
+
+        XCTAssertEqual(state.items.count, 1)
+        let item = try XCTUnwrap(state.items.first)
+
+        let data = try JSONEncoder().encode(item)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(json["type"] as? String, "perf")
+        XCTAssertEqual(json["name"] as? String, "perf.samples")
+        XCTAssertEqual(json["session_id"] as? String, "ses_golden123")
+        XCTAssertEqual(json["timestamp"] as? String, "2024-11-11T04:40:00.000Z")
+
+        let attrs = try XCTUnwrap(json["attributes"] as? [String: Any])
+        XCTAssertEqual(attrs["v"] as? Int, 1)
+        XCTAssertEqual(attrs["platform"] as? String, "ios")
+        XCTAssertEqual(attrs["interval_ms"] as? Int, 1000)
+
+        let device = try XCTUnwrap(attrs["device"] as? [String: Any])
+        XCTAssertEqual(device["os_version"] as? String, "26.4")
+        XCTAssertEqual(device["ram_mb"] as? Int, 6144)
+        XCTAssertEqual(device["storage_mb"] as? Int, 244_140)
+        XCTAssertEqual(device["cores"] as? Int, 6)
+        XCTAssertEqual(device["refresh_hz"] as? Int, 120)
+
+        let samples = try XCTUnwrap(attrs["samples"] as? [[String: Any]])
+        XCTAssertEqual(samples.count, 2)
+        XCTAssertNil(samples[0]["cpu"])
+        XCTAssertEqual(samples[1]["cpu"] as? Int, 25)
+        XCTAssertEqual(samples[1]["mem_mb"] as? Int, 200)
+        XCTAssertEqual(samples[1]["threads"] as? Int, 14)
+        XCTAssertEqual(samples[1]["thermal"] as? String, "nominal")
+        XCTAssertEqual(samples[1]["ram_free_mb"] as? Int, 2048)
+        XCTAssertEqual(samples[1]["storage_free_mb"] as? Int, 98_304)
+        XCTAssertEqual(samples[1]["net"] as? String, "wifi")
+        XCTAssertNil(samples[1]["battery"])
+        XCTAssertFalse(samples[1].values.contains { $0 is NSNull })
+    }
 }
 

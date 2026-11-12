@@ -32,5 +32,42 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertNotEqual(first, rotated)
         XCTAssertEqual(manager.sessionId, rotated)
     }
+
+    func testPeekDoesNotRefreshActivity() {
+        final class FakeClock: @unchecked Sendable {
+            var now: TimeInterval = 0
+        }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now })
+
+        let initialId = manager.sessionId
+
+        clock.now = 1000
+        XCTAssertEqual(manager.peekSessionId(), initialId)
+
+        clock.now = 1900
+        XCTAssertNil(manager.peekSessionId())
+        XCTAssertNotEqual(manager.sessionId, initialId)
+    }
+
+    func testRepeatedPeekStillAllowsRotationAtIdleTimeout() {
+        final class FakeClock: @unchecked Sendable {
+            var now: TimeInterval = 0
+        }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now })
+
+        let initialId = manager.sessionId
+
+        clock.now = 1000
+        XCTAssertEqual(manager.peekSessionId(), initialId)
+
+        clock.now = 1500
+        XCTAssertEqual(manager.peekSessionId(), initialId)
+
+        clock.now = 1801
+        XCTAssertNil(manager.peekSessionId())
+        XCTAssertNotEqual(manager.sessionId, initialId)
+    }
 }
 

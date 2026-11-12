@@ -21,7 +21,8 @@ struct ARTrackerDemoSwiftUIApp: App {
                 maskAllText: false,
                 wifiOnly: false,
                 flushInterval: 5,
-                debugLogging: true
+                debugLogging: true,
+                enablePerformanceMonitoring: true
             )
         )
     }

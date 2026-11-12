@@ -14,6 +14,7 @@ public final class ARTracker: @unchecked Sendable {
     private var _crashEngine: CrashEngine?
     private var _diskQueue: DiskQueue?
     private var _uploader: Uploader?
+    private var _perfMonitor: PerfMonitor?
     private var sessionStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     public static var isInstalled: Bool {
@@ -183,6 +184,9 @@ public final class ARTracker: @unchecked Sendable {
                 fps: config.replayFramesPerSecond
             )
         }
+
+        // 8.2 Start Performance Monitor if enabled
+        startPerfMonitorIfNeeded(config: config)
 
         // 9. API Key Early Validation (GAP-06)
         validateAPIKey(endpoint: endpoint, appKey: appKey, uploader: uploader)
@@ -442,6 +446,7 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     public static func flush(completion: (@Sendable () -> Void)? = nil) {
+        shared._perfMonitor?.flush()
         ReplayEngine.shared.flush()
         shared._uploader?.flush(completion: completion)
     }
@@ -499,15 +504,52 @@ public final class ARTracker: @unchecked Sendable {
         )
         enqueueItem(item)
     }
+    #endif
 
-    @objc private func handleAppDidBecomeActive() {
+    // MARK: - Performance Monitor & Lifecycle
+
+    internal func startPerfMonitorIfNeeded(config: ARTrackerConfig) {
+        guard config.enablePerformanceMonitoring else { return }
+        #if canImport(UIKit)
+        let frameSource: FrameSource? = DisplayLinkFrameSource()
+        #else
+        let frameSource: FrameSource? = nil
+        #endif
+        let sampler = PerfSampler(frames: frameSource)
+        let intervalMs = Int((config.performanceSampleInterval * 1000.0).rounded())
+        let monitor = PerfMonitor(
+            sampler: sampler,
+            intervalMs: intervalMs,
+            device: { PerfDevice.current(refreshHz: sampler.lastRefreshHz) },
+            sessionId: { SessionManager.shared.peekSessionId() },
+            userId: { SessionManager.shared.userId },
+            enqueue: { [weak self] item in self?.enqueueItem(item) }
+        )
+        _perfMonitor = monitor
+        monitor.start()
+    }
+
+    internal func _testInstallPerfMonitor(_ m: PerfMonitor?, queue: DiskQueue? = nil) {
+        _perfMonitor = m
+        _diskQueue = queue
+    }
+
+    internal var perfMonitorForTesting: PerfMonitor? {
+        _perfMonitor
+    }
+
+    @objc internal func handleAppDidBecomeActive() {
         sessionStartUptime = ProcessInfo.processInfo.systemUptime
         SessionManager.shared.touch()
         TerminationDetector.shared.setInForeground(true)
         _uploader?.resumeTimer()
+        _perfMonitor?.start()
     }
 
-    @objc private func handleAppDidEnterBackground() {
+    @objc internal func handleAppDidEnterBackground() {
+        _perfMonitor?.stop()
+        _perfMonitor?.flush()
+
         let durationMs = (ProcessInfo.processInfo.systemUptime - sessionStartUptime) * 1000.0
         let sessionEndItem = Item(
             type: .session,
@@ -527,12 +569,21 @@ public final class ARTracker: @unchecked Sendable {
         _uploader?.flush()
     }
 
-    @objc private func handleAppWillTerminate() {
+    @objc internal func handleAppWillTerminate() {
         TerminationDetector.shared.markCleanShutdown()
     }
 
-    @objc private func handleAppMemoryWarning() {
+    @objc internal func handleAppMemoryWarning() {
+        if _perfMonitor != nil {
+            let item = Item(
+                type: .event,
+                name: "perf.memory_warning",
+                sessionId: SessionManager.shared.peekSessionId(),
+                userId: SessionManager.shared.userId,
+                attributes: [:]
+            )
+            enqueueItem(item)
+        }
         _uploader?.flush()
     }
-    #endif
 }

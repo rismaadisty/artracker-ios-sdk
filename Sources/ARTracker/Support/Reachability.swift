@@ -10,6 +10,7 @@ public final class Reachability: @unchecked Sendable {
     private var _isConnected: Bool = true
     private var _isExpensive: Bool = false
     private var _isConstrained: Bool = false
+    private var _interfaceKind: String? = nil
     private var _isStarted: Bool = false
 
     public init() {}
@@ -19,10 +20,17 @@ public final class Reachability: @unchecked Sendable {
             guard !_isStarted else { return }
             _isStarted = true
             monitor.pathUpdateHandler = { [weak self] path in
+                let kind = NetKind.from(
+                    satisfied: path.status == .satisfied,
+                    wifi: path.usesInterfaceType(.wifi),
+                    cellular: path.usesInterfaceType(.cellular),
+                    wired: path.usesInterfaceType(.wiredEthernet)
+                )
                 self?.lock.withLock {
                     self?._isConnected = (path.status == .satisfied)
                     self?._isExpensive = path.isExpensive
                     self?._isConstrained = path.isConstrained
+                    self?._interfaceKind = kind
                 }
             }
             monitor.start(queue: queue)
@@ -47,6 +55,10 @@ public final class Reachability: @unchecked Sendable {
 
     public var isWiFi: Bool {
         lock.withLock { _isConnected && !_isExpensive }
+    }
+
+    internal var interfaceKind: String? {
+        lock.withLock { _interfaceKind }
     }
 
     public func canUpload(wifiOnly: Bool) -> Bool {
