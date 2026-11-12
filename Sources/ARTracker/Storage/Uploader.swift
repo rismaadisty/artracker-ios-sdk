@@ -13,6 +13,7 @@ public final class Uploader: @unchecked Sendable {
     private let backoff = BackoffStrategy()
     private var isUploading: Bool = false
     private var isDisabled: Bool = false
+    private var isTimerSuspended: Bool = false
     private var timer: DispatchSourceTimer?
     private let workQueue = DispatchQueue(label: "id.art.tracker.uploader", qos: .utility)
 
@@ -37,22 +38,29 @@ public final class Uploader: @unchecked Sendable {
     }
 
     deinit {
-        stopTimer()
+        lock.withLock {
+            stopTimerLocked()
+        }
     }
 
     public func start() {
-        startTimer()
+        lock.withLock {
+            guard !isDisabled else { return }
+            startTimerLocked()
+        }
         flush()
     }
 
     public func stop() {
-        stopTimer()
+        lock.withLock {
+            stopTimerLocked()
+        }
     }
 
     public func disable() {
         lock.withLock {
             isDisabled = true
-            stopTimer()
+            stopTimerLocked()
         }
     }
 
@@ -62,43 +70,59 @@ public final class Uploader: @unchecked Sendable {
         }
     }
 
-    private func startTimer() {
-        lock.withLock {
-            guard timer == nil else { return }
-            let t = DispatchSource.makeTimerSource(queue: workQueue)
-            t.schedule(
-                deadline: .now() + config.flushInterval,
-                repeating: config.flushInterval,
-                leeway: .seconds(2)
-            )
-            t.setEventHandler { [weak self] in
-                self?.performUpload(completion: nil)
-            }
-            t.resume()
-            self.timer = t
-        }
-    }
-
     public func suspendTimer() {
         lock.withLock {
-            timer?.suspend()
+            suspendTimerLocked()
         }
     }
 
     public func resumeTimer() {
         lock.withLock {
-            timer?.resume()
+            resumeTimerLocked()
         }
     }
 
-    private func stopTimer() {
-        lock.withLock {
-            if let t = timer {
-                t.cancel()
-                self.timer = nil
-            }
+    private func startTimerLocked() {
+        guard timer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: workQueue)
+        t.schedule(
+            deadline: .now() + config.flushInterval,
+            repeating: config.flushInterval,
+            leeway: .seconds(2)
+        )
+        t.setEventHandler { [weak self] in
+            self?.performUpload(completion: nil)
         }
+        isTimerSuspended = false
+        t.resume()
+        self.timer = t
     }
+
+    private func suspendTimerLocked() {
+        guard let t = timer, !isTimerSuspended else { return }
+        t.suspend()
+        isTimerSuspended = true
+    }
+
+    private func resumeTimerLocked() {
+        guard let t = timer, isTimerSuspended else { return }
+        t.resume()
+        isTimerSuspended = false
+    }
+
+    private func stopTimerLocked() {
+        guard let t = timer else { return }
+        if isTimerSuspended {
+            t.resume()
+            isTimerSuspended = false
+        }
+        t.cancel()
+        self.timer = nil
+    }
+
+    internal var isTimerSuspendedForTesting: Bool { lock.withLock { isTimerSuspended } }
+    internal var hasTimerForTesting: Bool { lock.withLock { timer != nil } }
+    internal var isDisabledForTesting: Bool { lock.withLock { isDisabled } }
 
     private func performUpload(completion: (@Sendable () -> Void)?) {
         let shouldProceed: Bool = lock.withLock {
@@ -206,7 +230,10 @@ public final class Uploader: @unchecked Sendable {
 
         case 401, 403:
             // Unauthorized / forbidden: auto-disable to prevent spamming
-            lock.withLock { isDisabled = true }
+            lock.withLock {
+                isDisabled = true
+                stopTimerLocked()
+            }
             queue.delete(ids: batch.recordIds)
             Metrics.shared.incrementDropped(by: batch.itemCount)
             Log.error("Invalid API Key. ARTracker auto-disabled. (HTTP \(http.statusCode)): \(responseBody)")

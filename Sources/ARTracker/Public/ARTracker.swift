@@ -17,6 +17,10 @@ public final class ARTracker: @unchecked Sendable {
     private var _perfMonitor: PerfMonitor?
     private var sessionStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
+    private var currentDiskQueue: DiskQueue? { lock.withLock { _diskQueue } }
+    private var currentUploader: Uploader? { lock.withLock { _uploader } }
+    private var currentPerfMonitor: PerfMonitor? { lock.withLock { _perfMonitor } }
+
     public static var isInstalled: Bool {
         shared.lock.withLock { shared._isInstalled }
     }
@@ -132,7 +136,9 @@ public final class ARTracker: @unchecked Sendable {
 
         // 2. Disk Queue SQLite WAL
         let queue = DiskQueue()
-        self._diskQueue = queue
+        lock.withLock {
+            self._diskQueue = queue
+        }
 
         // 3. Process Pending Crash Reports (PLCrashReporter)
         processPendingCrashReports(queue: queue)
@@ -169,7 +175,9 @@ public final class ARTracker: @unchecked Sendable {
             config: config,
             queue: queue
         )
-        self._uploader = uploader
+        lock.withLock {
+            self._uploader = uploader
+        }
         uploader.start()
 
         // 8.1 Start Session Replay Engine if enabled
@@ -446,13 +454,13 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     public static func flush(completion: (@Sendable () -> Void)? = nil) {
-        shared._perfMonitor?.flush()
+        shared.currentPerfMonitor?.flush()
         ReplayEngine.shared.flush()
-        shared._uploader?.flush(completion: completion)
+        shared.currentUploader?.flush(completion: completion)
     }
 
     public static func debugMetrics(completion: @escaping @Sendable (TrackerMetricsSummary) -> Void) {
-        let qDepth = shared._diskQueue?.count() ?? 0
+        let qDepth = shared.currentDiskQueue?.count() ?? 0
         let launchA = LaunchMetrics.shared.phaseAMs
         let summary = Metrics.shared.snapshot(queueDepth: qDepth, launchPhaseAMs: launchA)
         completion(summary)
@@ -465,7 +473,7 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     public func enqueueItem(_ item: Item) {
-        _ = _diskQueue?.enqueue(item)
+        _ = currentDiskQueue?.enqueue(item)
     }
 
     #if canImport(UIKit)
@@ -525,30 +533,35 @@ public final class ARTracker: @unchecked Sendable {
             userId: { SessionManager.shared.userId },
             enqueue: { [weak self] item in self?.enqueueItem(item) }
         )
-        _perfMonitor = monitor
+        lock.withLock {
+            _perfMonitor = monitor
+        }
         monitor.start()
     }
 
     internal func _testInstallPerfMonitor(_ m: PerfMonitor?, queue: DiskQueue? = nil) {
-        _perfMonitor = m
-        _diskQueue = queue
+        lock.withLock {
+            _perfMonitor = m
+            _diskQueue = queue
+        }
     }
 
     internal var perfMonitorForTesting: PerfMonitor? {
-        _perfMonitor
+        currentPerfMonitor
     }
 
     @objc internal func handleAppDidBecomeActive() {
         sessionStartUptime = ProcessInfo.processInfo.systemUptime
         SessionManager.shared.touch()
         TerminationDetector.shared.setInForeground(true)
-        _uploader?.resumeTimer()
-        _perfMonitor?.start()
+        currentUploader?.resumeTimer()
+        currentPerfMonitor?.start()
     }
 
     @objc internal func handleAppDidEnterBackground() {
-        _perfMonitor?.stop()
-        _perfMonitor?.flush()
+        let monitor = currentPerfMonitor
+        monitor?.stop()
+        monitor?.flush()
 
         let durationMs = (ProcessInfo.processInfo.systemUptime - sessionStartUptime) * 1000.0
         let sessionEndItem = Item(
@@ -565,8 +578,9 @@ public final class ARTracker: @unchecked Sendable {
 
         TerminationDetector.shared.setInForeground(false)
         ReplayEngine.shared.flush()
-        _uploader?.suspendTimer()
-        _uploader?.flush()
+        let uploader = currentUploader
+        uploader?.suspendTimer()
+        uploader?.flush()
     }
 
     @objc internal func handleAppWillTerminate() {
@@ -574,7 +588,7 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     @objc internal func handleAppMemoryWarning() {
-        if _perfMonitor != nil {
+        if currentPerfMonitor != nil {
             let item = Item(
                 type: .event,
                 name: "perf.memory_warning",
@@ -584,6 +598,6 @@ public final class ARTracker: @unchecked Sendable {
             )
             enqueueItem(item)
         }
-        _uploader?.flush()
+        currentUploader?.flush()
     }
 }
