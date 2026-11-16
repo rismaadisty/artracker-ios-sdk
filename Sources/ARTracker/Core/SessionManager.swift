@@ -147,4 +147,10 @@ public final class SessionManager: @unchecked Sendable {
         let hex = bytes.map { String(format: "%02x", $0) }.joined()
         return "ses_" + hex
     }
+
+    internal func _testSetExpired() {
+        lock.withLock {
+            _lastActivity = 0
+        }
+    }
 }

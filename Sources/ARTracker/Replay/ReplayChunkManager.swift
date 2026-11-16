@@ -25,6 +25,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private var hasError: Bool = false
     private var hasRageClick: Bool = false
     private var flushTimer: DispatchSourceTimer?
+    private var oneShotFlushTimer: DispatchSourceTimer?
     private var isFlushing: Bool = false
 
     // Callbacks
@@ -87,6 +88,45 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 self.triggerFlushLocked()
             }
             self.processPendingUploads(completion: completion)
+        }
+    }
+
+    public func pauseFlushTimer() {
+        workerQueue.async { [weak self] in
+            self?.flushTimer?.cancel()
+            self?.flushTimer = nil
+            self?.oneShotFlushTimer?.cancel()
+            self?.oneShotFlushTimer = nil
+        }
+    }
+
+    public func resumeFlushTimer() {
+        workerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.oneShotFlushTimer?.cancel()
+            self.oneShotFlushTimer = nil
+            if self.flushTimer == nil {
+                self.startFlushTimer()
+            }
+        }
+    }
+
+    public func scheduleOneShotFlush(after seconds: TimeInterval) {
+        workerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.oneShotFlushTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: self.workerQueue)
+            timer.schedule(deadline: .now() + seconds)
+            timer.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                self.lock.withLock {
+                    self.triggerFlushLocked()
+                }
+                self.processPendingUploads(completion: nil)
+                self.oneShotFlushTimer = nil
+            }
+            timer.resume()
+            self.oneShotFlushTimer = timer
         }
     }
 
