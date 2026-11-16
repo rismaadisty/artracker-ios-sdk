@@ -145,7 +145,7 @@ public final class ReplayEngine: @unchecked Sendable {
     }
 
     private func setupTouchTracking() {
-        TouchTracker.shared.start { [weak self] point, kind, isRageTap in
+        TouchTracker.shared.setGestureHandler { [weak self] point, kind, isRageTap in
             guard let self = self else { return }
 
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)

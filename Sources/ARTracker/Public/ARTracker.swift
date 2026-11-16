@@ -159,10 +159,13 @@ public final class ARTracker: @unchecked Sendable {
             )
         }
 
-        // 7. View Tree Swizzle
+        // 7. View Tree Swizzle & Always-on Touch Tracking
         #if canImport(UIKit)
-        if config.enableViewCapture {
-            DispatchQueue.main.async {
+        DispatchQueue.main.async {
+            TouchTracker.shared.startActivityTracking {
+                SessionManager.shared.recordUserActivity()
+            }
+            if config.enableViewCapture {
                 UISwizzle.shared.enable()
             }
         }
