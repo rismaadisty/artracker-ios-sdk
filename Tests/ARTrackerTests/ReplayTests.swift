@@ -180,6 +180,7 @@ final class ReplayTests: XCTestCase {
         XCTAssertTrue(MaskingRules.shouldMask(view: marker, maskAllText: false))
 
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 300, height: 600))
+        window.isHidden = false
         let child = UIView(frame: CGRect(x: 10, y: 10, width: 100, height: 50))
         child.artrackerMasked = true
         window.addSubview(child)
