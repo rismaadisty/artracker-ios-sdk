@@ -45,9 +45,44 @@ public enum ReplayUploadError: Error, Sendable, LocalizedError {
     }
 }
 
+/// Protocol defining replay upload operations for chunk transmission and remote config fetching.
+public protocol ReplayUploading: Sendable {
+    func fetchReplayConfig(
+        completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void
+    )
+
+    func requestChunkUrl(
+        sessionId: String,
+        chunkSeq: Int,
+        sizeBytes: Int,
+        userId: String?,
+        environment: String,
+        startTime: String,
+        format: String,
+        completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+    )
+
+    func uploadGzipData(
+        uploadUrl: URL,
+        gzipData: Data,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    )
+
+    func acknowledgeChunk(
+        sessionId: String,
+        chunkSeq: Int,
+        sizeBytes: Int,
+        durationMs: Double,
+        eventCount: Int,
+        hasError: Bool,
+        hasRageClick: Bool,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    )
+}
+
 /// Network uploader for replay chunks.
 /// Uses an isolated ephemeral URLSession that bypasses ARTrackerURLProtocol to prevent infinite loops.
-public final class ReplayUploader: @unchecked Sendable {
+public final class ReplayUploader: ReplayUploading, @unchecked Sendable {
     private let endpoint: URL
     private let appKey: String
     private let session: URLSession

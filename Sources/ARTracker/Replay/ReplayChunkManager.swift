@@ -7,10 +7,11 @@ import UIKit
 /// Gzip compression, persistent disk queue in Caches, and uploading to backend / R2.
 public final class ReplayChunkManager: @unchecked Sendable {
     private let lock = UnfairLock()
-    private let uploader: ReplayUploader
+    private let uploader: any ReplayUploading
     private let environment: String
     private let wifiOnly: Bool
     private let diskQueue: ReplayDiskQueue
+    private let sessionIdProvider: @Sendable () -> String
     private let workerQueue = DispatchQueue(label: "com.artracker.replay.worker", qos: .utility)
 
     // Shared monotonic sequence counter
@@ -19,6 +20,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
     // Screenshot buffers
     private var screenFrameBuffer: [ScreenFramePayload] = []
     private var screenTouchBuffer: [ScreenTouchPoint] = []
+    private var currentChunkSessionId: String? = nil
 
     private var chunkStartTime: Date = Date()
     private var chunkStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
@@ -33,15 +35,17 @@ public final class ReplayChunkManager: @unchecked Sendable {
     public var onBudgetGovernorAlert: (@Sendable (_ shouldHalveFps: Bool, _ shouldStepDownQuality: Bool) -> Void)?
 
     public init(
-        uploader: ReplayUploader,
+        uploader: any ReplayUploading,
         environment: String,
         wifiOnly: Bool = false,
-        diskQueue: ReplayDiskQueue = ReplayDiskQueue()
+        diskQueue: ReplayDiskQueue = ReplayDiskQueue(),
+        sessionIdProvider: @escaping @Sendable () -> String = { SessionManager.shared.peekSessionId() ?? SessionManager.shared.sessionId }
     ) {
         self.uploader = uploader
         self.environment = environment
         self.wifiOnly = wifiOnly
         self.diskQueue = diskQueue
+        self.sessionIdProvider = sessionIdProvider
         startFlushTimer()
         processPendingUploads(completion: nil)
     }
@@ -62,6 +66,15 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     public func appendScreenFrame(_ frame: ScreenFramePayload) {
         lock.withLock {
+            let currentSession = sessionIdProvider()
+            if (!screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty),
+               let chunkSession = currentChunkSessionId,
+               chunkSession != currentSession {
+                triggerFlushLocked()
+            }
+            if currentChunkSessionId == nil {
+                currentChunkSessionId = currentSession
+            }
             screenFrameBuffer.append(frame)
             if screenFrameBuffer.count >= 20 {
                 triggerFlushLocked()
@@ -71,6 +84,15 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     public func appendScreenTouch(_ touch: ScreenTouchPoint) {
         lock.withLock {
+            let currentSession = sessionIdProvider()
+            if (!screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty),
+               let chunkSession = currentChunkSessionId,
+               chunkSession != currentSession {
+                triggerFlushLocked()
+            }
+            if currentChunkSessionId == nil {
+                currentChunkSessionId = currentSession
+            }
             screenTouchBuffer.append(touch)
             if screenFrameBuffer.count >= 20 || screenTouchBuffer.count >= 200 {
                 triggerFlushLocked()
@@ -146,6 +168,9 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private func triggerFlushLocked() {
         guard !screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty else { return }
 
+        let chunkSession = currentChunkSessionId ?? sessionIdProvider()
+        currentChunkSessionId = nil
+
         let nowUptime = ProcessInfo.processInfo.systemUptime
         let durationMs = max(100.0, (nowUptime - chunkStartUptime) * 1000.0)
         let sTime = ISO8601DateFormatter().string(from: chunkStartTime)
@@ -184,7 +209,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 hasError: chunkHasErr,
                 hasRage: chunkHasRage,
                 startTime: sTime,
-                data: gzipped
+                data: gzipped,
+                sessionId: chunkSession
             )
             diskQueue.enqueue(item)
 
@@ -222,7 +248,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 return
             }
 
-            let sessionId = SessionManager.shared.sessionId
+            let sessionId = queueItem.sessionId ?? self.sessionIdProvider()
             let userId = SessionManager.shared.userId
 
             #if canImport(UIKit)
