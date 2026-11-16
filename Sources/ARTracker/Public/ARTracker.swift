@@ -479,21 +479,10 @@ public final class ARTracker: @unchecked Sendable {
     #if canImport(UIKit)
     @MainActor
     public func recordScreenView(name: String, view: UIView?) {
-        var attrs: [String: JSONValue] = [
+        let attrs: [String: JSONValue] = [
             "screen": .string(name),
             "presentation": .string("push")
         ]
-
-        if let v = view, let config = _config, config.enableViewCapture {
-            if ViewSnapshotter.shared.shouldCapture(screen: name) {
-                let (tree, maskedCount) = ViewSnapshotter.shared.capture(view: v, maskAllText: config.maskAllText)
-                attrs["masked_count"] = .number(Double(maskedCount))
-                if let treeData = try? JSONEncoder().encode(tree),
-                   let jsonVal = try? JSONDecoder().decode(JSONValue.self, from: treeData) {
-                    attrs["view_tree"] = jsonVal
-                }
-            }
-        }
 
         if let config = _config, config.enableSessionReplay {
             ReplayEngine.shared.captureFullSnapshot(triggerReason: "screen.view", screenName: name)
@@ -552,7 +541,7 @@ public final class ARTracker: @unchecked Sendable {
 
     @objc internal func handleAppDidBecomeActive() {
         sessionStartUptime = ProcessInfo.processInfo.systemUptime
-        SessionManager.shared.touch()
+        SessionManager.shared.recordUserActivity()
         TerminationDetector.shared.setInForeground(true)
         currentUploader?.resumeTimer()
         currentPerfMonitor?.start()

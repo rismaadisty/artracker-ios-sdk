@@ -1,5 +1,10 @@
 import Foundation
 
+internal protocol SessionLifecycleListener: AnyObject, Sendable {
+    func sessionDidStart(id: String)
+    func sessionDidEnd(id: String, durationMs: Double)
+}
+
 public final class SessionManager: @unchecked Sendable {
     public static let shared = SessionManager()
 
@@ -7,27 +12,87 @@ public final class SessionManager: @unchecked Sendable {
     private let uptime: @Sendable () -> TimeInterval
     private var _sessionId: String
     private var _userId: String?
+    private var _startedAt: TimeInterval
     private var _lastActivity: TimeInterval
     private let idleTimeout: TimeInterval = 1800 // 30 minutes
+    private let maxDuration: TimeInterval = 86_400 // 24 hours
+
+    internal weak var listener: SessionLifecycleListener?
 
     public convenience init() {
-        self.init(uptime: { ProcessInfo.processInfo.systemUptime })
+        self.init(uptime: {
+            Double(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) / 1_000_000_000.0
+        })
     }
 
     internal init(uptime: @escaping @Sendable () -> TimeInterval) {
         self.uptime = uptime
         self._sessionId = Self.generateSessionId()
-        self._lastActivity = uptime()
+        let now = uptime()
+        self._startedAt = now
+        self._lastActivity = now
     }
 
     public var sessionId: String {
+        var endToNotify: (id: String, durationMs: Double)?
+        var startToNotify: String?
+
+        let id = lock.withLock { () -> String in
+            let now = uptime()
+            let expired = max(0, now - _lastActivity) > idleTimeout
+            // Rotate on the 24 h cap only when !isExpired
+            if !expired && (now - _startedAt >= maxDuration) {
+                let oldId = _sessionId
+                let durationMs = max(0, (_lastActivity - _startedAt) * 1000.0)
+                _sessionId = Self.generateSessionId()
+                _startedAt = now
+                endToNotify = (oldId, durationMs)
+                startToNotify = _sessionId
+            }
+            return _sessionId
+        }
+
+        if let end = endToNotify {
+            listener?.sessionDidEnd(id: end.id, durationMs: end.durationMs)
+        }
+        if let start = startToNotify {
+            listener?.sessionDidStart(id: start)
+        }
+        return id
+    }
+
+    public var isExpired: Bool {
+        lock.withLock {
+            max(0, uptime() - _lastActivity) > idleTimeout
+        }
+    }
+
+    /// Records user interaction, rotating session if expired or max duration cap is reached.
+    public func recordUserActivity() {
+        var endToNotify: (id: String, durationMs: Double)?
+        var startToNotify: String?
+
         lock.withLock {
             let now = uptime()
-            if now - _lastActivity > idleTimeout {
+            let expired = max(0, now - _lastActivity) > idleTimeout
+            let hitCap = now - _startedAt >= maxDuration
+
+            if expired || hitCap {
+                let oldId = _sessionId
+                let durationMs = max(0, (_lastActivity - _startedAt) * 1000.0)
                 _sessionId = Self.generateSessionId()
+                _startedAt = now
+                endToNotify = (oldId, durationMs)
+                startToNotify = _sessionId
             }
             _lastActivity = now
-            return _sessionId
+        }
+
+        if let end = endToNotify {
+            listener?.sessionDidEnd(id: end.id, durationMs: end.durationMs)
+        }
+        if let start = startToNotify {
+            listener?.sessionDidStart(id: start)
         }
     }
 
@@ -35,7 +100,7 @@ public final class SessionManager: @unchecked Sendable {
     public func peekSessionId() -> String? {
         lock.withLock {
             let now = uptime()
-            if now - _lastActivity > idleTimeout {
+            if max(0, now - _lastActivity) > idleTimeout {
                 return nil
             }
             return _sessionId
@@ -48,17 +113,32 @@ public final class SessionManager: @unchecked Sendable {
     }
 
     public func touch() {
-        lock.withLock {
-            _lastActivity = uptime()
-        }
+        recordUserActivity()
     }
 
     public func rotateSession() -> String {
-        lock.withLock {
+        var endToNotify: (id: String, durationMs: Double)?
+        var startToNotify: String?
+
+        let id = lock.withLock { () -> String in
+            let now = uptime()
+            let oldId = _sessionId
+            let durationMs = max(0, (_lastActivity - _startedAt) * 1000.0)
             _sessionId = Self.generateSessionId()
-            _lastActivity = uptime()
+            _startedAt = now
+            _lastActivity = now
+            endToNotify = (oldId, durationMs)
+            startToNotify = _sessionId
             return _sessionId
         }
+
+        if let end = endToNotify {
+            listener?.sessionDidEnd(id: end.id, durationMs: end.durationMs)
+        }
+        if let start = startToNotify {
+            listener?.sessionDidStart(id: start)
+        }
+        return id
     }
 
     public static func generateSessionId() -> String {
@@ -68,4 +148,3 @@ public final class SessionManager: @unchecked Sendable {
         return "ses_" + hex
     }
 }
-
