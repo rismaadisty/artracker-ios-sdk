@@ -192,7 +192,9 @@ public final class ARTracker: @unchecked Sendable {
                 maskAllText: config.maskAllText,
                 wifiOnly: config.wifiOnly,
                 quality: config.replayQuality,
-                fps: config.replayFramesPerSecond
+                fps: config.replayFramesPerSecond,
+                idleAfterMs: Int64(config.replayIdleAfter * 1000.0),
+                dormantAfterMs: Int64(config.replayDormantAfter * 1000.0)
             )
         }
 
@@ -505,6 +507,23 @@ public final class ARTracker: @unchecked Sendable {
         enqueueItem(item)
     }
     #endif
+
+    /// Manually triggers an immediate screenshot capture in session replay mode.
+    /// - Parameter reason: Descriptive context for the capture (debug-logged only).
+    public static func captureReplayFrame(reason: String = "manual") {
+        Log.debug("ARTracker: Manual captureReplayFrame requested with reason: \(reason)")
+        #if canImport(UIKit)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                ReplayEngine.shared.trigger(.manual)
+            }
+        } else {
+            Task { @MainActor in
+                ReplayEngine.shared.trigger(.manual)
+            }
+        }
+        #endif
+    }
 
     // MARK: - Performance Monitor & Lifecycle
 

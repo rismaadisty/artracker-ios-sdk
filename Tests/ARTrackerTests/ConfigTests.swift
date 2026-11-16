@@ -14,6 +14,28 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(tooHigh.performanceSampleInterval, 10.0)
     }
 
+    func testReplayIdleThresholdClamping() {
+        // Defaults: idle 30, dormant 180
+        let defaultConfig = ARTrackerConfig()
+        XCTAssertEqual(defaultConfig.replayIdleAfter, 30.0)
+        XCTAssertEqual(defaultConfig.replayDormantAfter, 180.0)
+
+        // idle 2 -> clamped to 5
+        let idleTooLow = ARTrackerConfig(replayIdleAfter: 2.0, replayDormantAfter: 180.0)
+        XCTAssertEqual(idleTooLow.replayIdleAfter, 5.0)
+        XCTAssertEqual(idleTooLow.replayDormantAfter, 180.0)
+
+        // dormant 5 with idle 30 -> clamped to idle + 1 = 31
+        let dormantTooLow = ARTrackerConfig(replayIdleAfter: 30.0, replayDormantAfter: 5.0)
+        XCTAssertEqual(dormantTooLow.replayIdleAfter, 30.0)
+        XCTAssertEqual(dormantTooLow.replayDormantAfter, 31.0)
+
+        // idle 30 with dormant 30.5 -> 30.5 allowed
+        let dormantFractional = ARTrackerConfig(replayIdleAfter: 30.0, replayDormantAfter: 30.5)
+        XCTAssertEqual(dormantFractional.replayIdleAfter, 30.0)
+        XCTAssertEqual(dormantFractional.replayDormantAfter, 30.5)
+    }
+
     func testPerfItemTypeEncoding() throws {
         XCTAssertEqual(ItemType.perf.rawValue, "perf")
 

@@ -87,6 +87,12 @@ public struct ARTrackerConfig: Sendable {
     /// Sampling interval in seconds for performance profiling. Clamped 0.5...10.0, default: 1.0.
     public var performanceSampleInterval: TimeInterval
 
+    /// Inactivity interval in seconds before replay transitions to IDLE (0.2 fps). Clamped >= 5.0, default: 30.0.
+    public var replayIdleAfter: TimeInterval
+
+    /// Inactivity interval in seconds before replay transitions to DORMANT (0 fps). Clamped > replayIdleAfter, default: 180.0.
+    public var replayDormantAfter: TimeInterval
+
     public init(
         environment: String = "production",
         appVersion: String? = nil,
@@ -104,7 +110,9 @@ public struct ARTrackerConfig: Sendable {
         instrumentAllSessions: Bool = false,
         debugLogging: Bool = false,
         enablePerformanceMonitoring: Bool = false,
-        performanceSampleInterval: TimeInterval = 1.0
+        performanceSampleInterval: TimeInterval = 1.0,
+        replayIdleAfter: TimeInterval = 30.0,
+        replayDormantAfter: TimeInterval = 180.0
     ) {
         self.environment = String(environment.prefix(64))
         self.appVersion = appVersion.map { String($0.prefix(64)) }
@@ -123,6 +131,8 @@ public struct ARTrackerConfig: Sendable {
         self.debugLogging = debugLogging
         self.enablePerformanceMonitoring = enablePerformanceMonitoring
         self.performanceSampleInterval = max(0.5, min(performanceSampleInterval, 10.0))
+        self.replayIdleAfter = max(5.0, replayIdleAfter)
+        self.replayDormantAfter = replayDormantAfter > self.replayIdleAfter ? replayDormantAfter : self.replayIdleAfter + 1.0
     }
 }
 

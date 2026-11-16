@@ -330,7 +330,7 @@ public final class ReplayEngine: @unchecked Sendable {
     }
 
     private func setupWindowObserver() {
-        let t = NotificationCenter.default.addObserver(
+        let t1 = NotificationCenter.default.addObserver(
             forName: UIWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
@@ -339,7 +339,34 @@ public final class ReplayEngine: @unchecked Sendable {
                 self?.trigger(.window)
             }
         }
-        observerTokens.append(t)
+        let t2 = NotificationCenter.default.addObserver(
+            forName: UIWindow.didBecomeVisibleNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.trigger(.window)
+            }
+        }
+        let t3 = NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardDidShowNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.trigger(.keyboard)
+            }
+        }
+        let t4 = NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardDidHideNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.trigger(.keyboard)
+            }
+        }
+        observerTokens.append(contentsOf: [t1, t2, t3, t4])
     }
 
     private func setupAppLifecycleObservers() {

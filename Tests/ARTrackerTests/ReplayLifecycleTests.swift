@@ -327,5 +327,95 @@ final class ReplayLifecycleTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
     }
+
+    @MainActor
+    func testNewWindowInDormantCapturesOnce() {
+        let clockBox = ClockBox()
+        let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
+        let uploader = ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "test")
+        let window = createTestWindow()
+
+        ReplayEngine.shared.startForTesting(
+            uploader: uploader,
+            diskQueue: diskQueue,
+            fps: 2.0,
+            idleAfterMs: 1_000,
+            dormantAfterMs: 2_000,
+            clock: { clockBox.nowMs },
+            windowProvider: { [window] },
+            isAppActive: { true }
+        )
+
+        // Move to dormant
+        clockBox.nowMs += 2_500
+        ReplayEngine.shared.evaluateLifecycleForTesting()
+        XCTAssertEqual(ReplayEngine.shared.governorStateForTesting, .dormant)
+
+        ReplayEngine.shared.flushCapturerForTesting()
+        let preCount = ReplayEngine.shared.capturedFrameCountForTesting
+
+        // Present or post new window visible
+        NotificationCenter.default.post(name: UIWindow.didBecomeVisibleNotification, object: window)
+
+        // Wait for 300ms debounce
+        let exp = expectation(description: "Window trigger captured")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            ReplayEngine.shared.flushCapturerForTesting()
+            XCTAssertEqual(ReplayEngine.shared.capturedFrameCountForTesting, preCount + 1)
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+    }
+
+    @MainActor
+    func testManualCaptureImmediate() {
+        let clockBox = ClockBox()
+        let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
+        let uploader = ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "test")
+        let window = createTestWindow()
+
+        ReplayEngine.shared.startForTesting(
+            uploader: uploader,
+            diskQueue: diskQueue,
+            fps: 2.0,
+            idleAfterMs: 1_000,
+            dormantAfterMs: 2_000,
+            clock: { clockBox.nowMs },
+            windowProvider: { [window] },
+            isAppActive: { true }
+        )
+
+        // Move to dormant
+        clockBox.nowMs += 2_500
+        ReplayEngine.shared.evaluateLifecycleForTesting()
+        XCTAssertEqual(ReplayEngine.shared.governorStateForTesting, .dormant)
+
+        ReplayEngine.shared.flushCapturerForTesting()
+        let preCount = ReplayEngine.shared.capturedFrameCountForTesting
+
+        // Manual capture request via public API
+        ARTracker.captureReplayFrame(reason: "user_debug")
+        ReplayEngine.shared.flushCapturerForTesting()
+
+        // Immediate frame captured synchronously without debounce
+        XCTAssertEqual(ReplayEngine.shared.capturedFrameCountForTesting, preCount + 1)
+    }
+
+    func testNetworkCompletionTriggersReplayButSdkEndpointDoesNot() {
+        ARTrackerURLProtocol.endpointHost = "ingest.artracker.io"
+
+        // SDK ingest request -> must NOT be handled by ARTrackerURLProtocol
+        let sdkUrl = URL(string: "https://ingest.artracker.io/api/v1/event")!
+        var sdkReq = URLRequest(url: sdkUrl)
+        XCTAssertFalse(ARTrackerURLProtocol.canInit(with: sdkReq))
+
+        sdkReq.setValue("test_key", forHTTPHeaderField: "X-Artracker-Key")
+        XCTAssertFalse(ARTrackerURLProtocol.canInit(with: sdkReq))
+
+        // Normal app request -> must be handled by ARTrackerURLProtocol
+        let appUrl = URL(string: "https://api.myapp.com/v1/users")!
+        let appReq = URLRequest(url: appUrl)
+        XCTAssertTrue(ARTrackerURLProtocol.canInit(with: appReq))
+    }
 }
 #endif
