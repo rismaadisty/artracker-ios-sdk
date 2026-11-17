@@ -20,6 +20,7 @@ public final class ARTracker: @unchecked Sendable {
     private var currentDiskQueue: DiskQueue? { lock.withLock { _diskQueue } }
     private var currentUploader: Uploader? { lock.withLock { _uploader } }
     private var currentPerfMonitor: PerfMonitor? { lock.withLock { _perfMonitor } }
+    private var hasEmittedInitialSessionStart: Bool = false
 
     public static var isInstalled: Bool {
         shared.lock.withLock { shared._isInstalled }
@@ -204,18 +205,9 @@ public final class ARTracker: @unchecked Sendable {
         // 9. API Key Early Validation (GAP-06)
         validateAPIKey(endpoint: endpoint, appKey: appKey, uploader: uploader)
 
-        // 10. Automatic Session Lifecycle Event (GAP-07)
-        let sessionItem = Item(
-            type: .session,
-            name: "session.start",
-            sessionId: SessionManager.shared.sessionId,
-            userId: SessionManager.shared.userId,
-            attributes: [
-                "launch_type": .string("cold"),
-                "session_id": .string(SessionManager.shared.sessionId)
-            ]
-        )
-        _ = queue.enqueue(sessionItem)
+        // 10. Automatic Session Lifecycle Event (aligned with Android)
+        SessionManager.shared.listener = self
+        sessionDidStart(id: SessionManager.shared.sessionId)
 
         Log.info("ARTracker Phase B completed. SDK active.")
     }
@@ -562,7 +554,6 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     @objc internal func handleAppDidBecomeActive() {
-        sessionStartUptime = ProcessInfo.processInfo.systemUptime
         SessionManager.shared.recordUserActivity()
         TerminationDetector.shared.setInForeground(true)
         currentUploader?.resumeTimer()
@@ -573,19 +564,6 @@ public final class ARTracker: @unchecked Sendable {
         let monitor = currentPerfMonitor
         monitor?.stop()
         monitor?.flush()
-
-        let durationMs = (ProcessInfo.processInfo.systemUptime - sessionStartUptime) * 1000.0
-        let sessionEndItem = Item(
-            type: .session,
-            name: "session.end",
-            sessionId: SessionManager.shared.sessionId,
-            userId: SessionManager.shared.userId,
-            attributes: [
-                "duration_ms": .number(durationMs),
-                "session_id": .string(SessionManager.shared.sessionId)
-            ]
-        )
-        enqueueItem(sessionEndItem)
 
         TerminationDetector.shared.setInForeground(false)
         ReplayEngine.shared.flush()
@@ -610,5 +588,51 @@ public final class ARTracker: @unchecked Sendable {
             enqueueItem(item)
         }
         currentUploader?.flush()
+    }
+
+    internal func _testResetSessionStartFlag() {
+        lock.withLock {
+            hasEmittedInitialSessionStart = false
+        }
+    }
+}
+
+extension ARTracker: SessionLifecycleListener {
+    func sessionDidStart(id: String) {
+        let isFirst = lock.withLock { () -> Bool in
+            let first = !hasEmittedInitialSessionStart
+            hasEmittedInitialSessionStart = true
+            return first
+        }
+
+        var attrs: [String: JSONValue] = [
+            "session_id": .string(id)
+        ]
+        if isFirst {
+            attrs["launch_type"] = .string("cold")
+        }
+
+        let item = Item(
+            type: .session,
+            name: "session_start",
+            sessionId: id,
+            userId: SessionManager.shared.userId,
+            attributes: attrs
+        )
+        enqueueItem(item)
+    }
+
+    func sessionDidEnd(id: String, durationMs: Double) {
+        let item = Item(
+            type: .session,
+            name: "session_end",
+            sessionId: id,
+            userId: SessionManager.shared.userId,
+            attributes: [
+                "duration_ms": .number(durationMs),
+                "session_id": .string(id)
+            ]
+        )
+        enqueueItem(item)
     }
 }
