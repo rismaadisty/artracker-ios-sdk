@@ -9,10 +9,12 @@ final class PerfLifecycleTests: XCTestCase {
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         ARTracker.shared._testInstallPerfMonitor(nil, queue: nil)
+        SessionManager.shared.recordUserActivity()
     }
 
     override func tearDownWithError() throws {
         ARTracker.shared._testInstallPerfMonitor(nil, queue: nil)
+        SessionManager.shared.recordUserActivity()
         if let tempDir = tempDir {
             try? FileManager.default.removeItem(at: tempDir)
         }
