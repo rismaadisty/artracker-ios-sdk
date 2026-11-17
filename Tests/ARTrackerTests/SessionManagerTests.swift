@@ -204,5 +204,89 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(spy.endedEvents.count, 1)
         XCTAssertEqual(spy.endedEvents.first?.durationMs, 85_200 * 1000)
     }
+
+    func testRelaunchWithin30MinKeepsSession() {
+        let suiteName = "test.session.persist.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        final class FakeClock: @unchecked Sendable {
+            var now: TimeInterval = 1_000_000
+        }
+        let clock = FakeClock()
+
+        let manager1 = SessionManager(clock: { clock.now }, userDefaults: defaults)
+        let initialId = manager1.sessionId
+        manager1.recordUserActivity()
+        manager1.persistSession(forced: true)
+
+        // Relaunch 15 minutes later (< 30 min idle timeout)
+        clock.now += 15 * 60
+        let manager2 = SessionManager(clock: { clock.now }, userDefaults: defaults)
+
+        XCTAssertEqual(manager2.sessionId, initialId)
+        XCTAssertFalse(manager2.isExpired)
+    }
+
+    func testRelaunchAfter31MinEndsStoredSession() {
+        let suiteName = "test.session.expired.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        final class FakeClock: @unchecked Sendable {
+            var now: TimeInterval = 1_000_000
+        }
+        final class ListenerSpy: SessionLifecycleListener, @unchecked Sendable {
+            var endedEvents: [(id: String, durationMs: Double)] = []
+            func sessionDidStart(id: String) {}
+            func sessionDidEnd(id: String, durationMs: Double) { endedEvents.append((id, durationMs)) }
+        }
+
+        let clock = FakeClock()
+        let manager1 = SessionManager(clock: { clock.now }, userDefaults: defaults)
+        let initialId = manager1.sessionId
+        clock.now += 5 * 60 // activity at 5 min
+        manager1.recordUserActivity()
+        manager1.persistSession(forced: true)
+
+        // Relaunch 31 minutes after last activity (36 min total)
+        clock.now += 31 * 60
+        let spy = ListenerSpy()
+        let manager2 = SessionManager(clock: { clock.now }, userDefaults: defaults)
+        manager2.listener = spy
+
+        XCTAssertNotEqual(manager2.sessionId, initialId)
+        XCTAssertEqual(spy.endedEvents.count, 1)
+        XCTAssertEqual(spy.endedEvents.first?.id, initialId)
+        // Duration: last activity (5 min) - started (0 min) = 300 s = 300 000 ms
+        XCTAssertEqual(spy.endedEvents.first?.durationMs, 300_000)
+    }
+
+    func testClockJumpBackwardsDoesNotExtend() {
+        let suiteName = "test.session.clockjump.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        final class FakeClock: @unchecked Sendable {
+            var now: TimeInterval = 1_000_000
+        }
+        let clock = FakeClock()
+        let manager = SessionManager(clock: { clock.now }, userDefaults: defaults)
+        let initialId = manager.sessionId
+
+        // User activity at 1_000_000
+        manager.recordUserActivity()
+
+        // Clock jumps backwards by 500 seconds
+        clock.now -= 500
+        manager.recordUserActivity()
+
+        // 31 minutes later from the new time
+        clock.now += 31 * 60
+        XCTAssertTrue(manager.isExpired)
+
+        manager.recordUserActivity()
+        XCTAssertNotEqual(manager.sessionId, initialId)
+    }
 }
 

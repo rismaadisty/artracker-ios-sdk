@@ -565,6 +565,8 @@ public final class ARTracker: @unchecked Sendable {
         monitor?.stop()
         monitor?.flush()
 
+        SessionManager.shared.persistSession(forced: true)
+
         TerminationDetector.shared.setInForeground(false)
         ReplayEngine.shared.flush()
         let uploader = currentUploader
