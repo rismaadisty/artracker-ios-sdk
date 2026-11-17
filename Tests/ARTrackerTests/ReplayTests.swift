@@ -6,6 +6,83 @@ import UIKit
 
 final class ReplayTests: XCTestCase {
 
+    final class SpyChunkUploader: ReplayUploading, @unchecked Sendable {
+        private let lock = NSLock()
+        var ackedEventCounts: [Int] = []
+
+        func fetchReplayConfig(completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void) {
+            completion(.success(ReplayRemoteConfig(screenshotEnabled: true, maxFps: 2.0)))
+        }
+
+        func requestChunkUrl(
+            sessionId: String,
+            chunkSeq: Int,
+            sizeBytes: Int,
+            userId: String?,
+            environment: String,
+            startTime: String,
+            format: String = "artracker-mobile-v1",
+            completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+        ) {
+            completion(.success((URL(string: "https://example.com/upload")!, "key_\(chunkSeq)")))
+        }
+
+        func uploadGzipData(
+            uploadUrl: URL,
+            gzipData: Data,
+            completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        ) {
+            completion(.success(()))
+        }
+
+        func acknowledgeChunk(
+            sessionId: String,
+            chunkSeq: Int,
+            sizeBytes: Int,
+            durationMs: Double,
+            eventCount: Int,
+            hasError: Bool,
+            hasRageClick: Bool,
+            completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        ) {
+            lock.withLock {
+                ackedEventCounts.append(eventCount)
+            }
+            completion(.success(()))
+        }
+    }
+
+    func testChunkClosesWhenApproachingTwoMegabytes() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let spy = SpyChunkUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_size_cap" }
+        )
+
+        // Buat payload sekitar 900 KB per frame (base64)
+        let largeData = String(repeating: "A", count: 900_000)
+        let frame1 = ScreenFramePayload(ts: 1, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: largeData)
+        let frame2 = ScreenFramePayload(ts: 2, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: largeData)
+        let frame3 = ScreenFramePayload(ts: 3, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: largeData)
+
+        manager.appendScreenFrame(frame1) // ~900 KB
+        manager.appendScreenFrame(frame2) // ~1.8 MB (masih <= 2 MB)
+        manager.appendScreenFrame(frame3) // akan menjadi ~2.7 MB -> harus memicu flush frame1+frame2 lebih dulu!
+
+        let exp = expectation(description: "flush")
+        manager.flush { exp.fulfill() }
+        wait(for: [exp], timeout: 5.0)
+
+        XCTAssertEqual(spy.ackedEventCounts, [2, 1])
+    }
+
     func testScreenChunkPayloadMatchesOfficialContract() throws {
         let frame = ScreenFramePayload(
             ts: 1731143820120,

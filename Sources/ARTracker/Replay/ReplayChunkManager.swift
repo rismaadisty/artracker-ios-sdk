@@ -6,6 +6,8 @@ import UIKit
 /// Manages buffering of ScreenFramePayload and ScreenTouchPoint, 10s rotation,
 /// Gzip compression, persistent disk queue in Caches, and uploading to backend / R2.
 public final class ReplayChunkManager: @unchecked Sendable {
+    public static let maxChunkBytes: Int = 2 * 1024 * 1024
+
     private let lock = UnfairLock()
     private let uploader: any ReplayUploading
     private let environment: String
@@ -20,6 +22,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
     // Screenshot buffers
     private var screenFrameBuffer: [ScreenFramePayload] = []
     private var screenTouchBuffer: [ScreenTouchPoint] = []
+    private var currentBufferBytes: Int = 0
     private var activeSessionId: String? = nil
     private var currentChunkSessionId: String? = nil
 
@@ -94,8 +97,16 @@ public final class ReplayChunkManager: @unchecked Sendable {
         lock.withLock {
             let currentSession = sessionIdProvider()
             prepareSessionLocked(currentSession)
+
+            let frameBytes = frame.data.utf8.count
+            if !screenFrameBuffer.isEmpty && (currentBufferBytes + frameBytes > Self.maxChunkBytes) {
+                triggerFlushLocked()
+            }
+
             screenFrameBuffer.append(frame)
-            if screenFrameBuffer.count >= 20 {
+            currentBufferBytes += frameBytes
+
+            if screenFrameBuffer.count >= 20 || currentBufferBytes >= Self.maxChunkBytes {
                 triggerFlushLocked()
             }
         }
@@ -193,6 +204,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
         let touchesToUpload = screenTouchBuffer
         screenFrameBuffer.removeAll(keepingCapacity: true)
         screenTouchBuffer.removeAll(keepingCapacity: true)
+        currentBufferBytes = 0
 
         hasError = false
         hasRageClick = false
