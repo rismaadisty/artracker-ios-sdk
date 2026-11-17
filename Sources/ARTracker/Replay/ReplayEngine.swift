@@ -224,6 +224,11 @@ public final class ReplayEngine: @unchecked Sendable {
             self.frameCountLock.withLock {
                 self._capturedFrameCount += 1
             }
+            Task { @MainActor [weak self] in
+                if self?.governor?.state == .dormant {
+                    self?.chunkManager?.scheduleOneShotFlush(after: 10.0)
+                }
+            }
         }
         self.screenCapturer = capturer
         capturer.start()
@@ -300,15 +305,13 @@ public final class ReplayEngine: @unchecked Sendable {
             scheduleNextTransition()
         }
 
-        if governor.state == .dormant {
-            chunkManager?.scheduleOneShotFlush(after: 10.0)
-        }
+        let shouldForce = (kind == .manual || kind == .screen)
 
         if delayMs == 0 {
             // Synchronous execution for manual trigger
             pendingTriggerWorkItem?.cancel()
             pendingTriggerWorkItem = nil
-            screenCapturer?.captureImmediate(triggerReason: "trigger.\(kind.rawValue)", force: true)
+            screenCapturer?.captureImmediate(triggerReason: "trigger.\(kind.rawValue)", force: shouldForce)
         } else {
             // Coalesce debounced triggers: shortest deadline wins
             let deadline = ProcessInfo.processInfo.systemUptime + (Double(delayMs) / 1000.0)
@@ -321,7 +324,7 @@ public final class ReplayEngine: @unchecked Sendable {
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
                     self.pendingTriggerWorkItem = nil
-                    self.screenCapturer?.captureImmediate(triggerReason: "trigger.\(kind.rawValue)", force: true)
+                    self.screenCapturer?.captureImmediate(triggerReason: "trigger.\(kind.rawValue)", force: shouldForce)
                 }
             }
             self.pendingTriggerWorkItem = item

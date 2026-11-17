@@ -262,7 +262,10 @@ public final class ScreenCapturer {
                 // Align window coordinate system to canvas
                 let originInCanvas = primaryWindow.convert(window.bounds.origin, from: window)
                 ctx.cgContext.translateBy(x: originInCanvas.x, y: originInCanvas.y)
-                window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                let drawn = window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                if !drawn {
+                    window.layer.render(in: ctx.cgContext)
+                }
                 ctx.cgContext.restoreGState()
             }
 

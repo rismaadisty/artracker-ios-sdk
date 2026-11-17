@@ -106,6 +106,43 @@ final class ReplayLifecycleTests: XCTestCase {
     }
 
     @MainActor
+    func testNetworkTriggerWithStaticScreenIsSuppressedByDuplicateHash() {
+        let clockBox = ClockBox()
+        let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
+        let uploader = ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "test")
+        let window = createTestWindow()
+
+        ReplayEngine.shared.startForTesting(
+            uploader: uploader,
+            diskQueue: diskQueue,
+            fps: 2.0,
+            idleAfterMs: 1_000,
+            dormantAfterMs: 2_000,
+            clock: { clockBox.nowMs },
+            windowProvider: { [window] },
+            isAppActive: { true }
+        )
+
+        ReplayEngine.shared.flushCapturerForTesting()
+        let countAfterStart = ReplayEngine.shared.capturedFrameCountForTesting
+        XCTAssertGreaterThanOrEqual(countAfterStart, 1)
+
+        // Trigger .network dengan tampilan window yang sama persis
+        clockBox.nowMs += 600
+        ReplayEngine.shared.trigger(.network)
+
+        let exp = expectation(description: "wait debounce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+        ReplayEngine.shared.flushCapturerForTesting()
+
+        // Karena layar tidak berubah, duplicate hash harus menekan frame baru
+        XCTAssertEqual(ReplayEngine.shared.capturedFrameCountForTesting, countAfterStart)
+    }
+
+    @MainActor
     func testDormantTouchCapturesImmediately() {
         let clockBox = ClockBox()
         let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
@@ -355,6 +392,10 @@ final class ReplayLifecycleTests: XCTestCase {
         let preCount = ReplayEngine.shared.capturedFrameCountForTesting
 
         // Present or post new window visible
+        if let label = window.subviews.first(where: { $0 is UILabel }) as? UILabel {
+            label.text = "NewWindowOpened"
+        }
+        window.backgroundColor = .blue
         NotificationCenter.default.post(name: UIWindow.didBecomeVisibleNotification, object: window)
 
         // Wait for 300ms debounce
