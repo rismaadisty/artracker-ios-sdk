@@ -75,6 +75,7 @@ public final class ARTracker: @unchecked Sendable {
         self._crashEngine = crashEngine
         self.sessionStartUptime = ProcessInfo.processInfo.systemUptime
 
+        Self.applySessionConfig(config, to: SessionManager.shared)
         _ = SessionManager.shared.sessionId
 
         #if canImport(UIKit)
@@ -553,8 +554,12 @@ public final class ARTracker: @unchecked Sendable {
         currentPerfMonitor
     }
 
+    internal static func applySessionConfig(_ config: ARTrackerConfig, to manager: SessionManager) {
+        manager.configure(idleTimeout: config.sessionTimeout)
+    }
+
     @objc internal func handleAppDidBecomeActive() {
-        SessionManager.shared.recordUserActivity()
+        SessionManager.shared.onForeground()
         TerminationDetector.shared.setInForeground(true)
         currentUploader?.resumeTimer()
         currentPerfMonitor?.start()

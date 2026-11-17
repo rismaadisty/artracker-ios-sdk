@@ -430,5 +430,17 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(spy.endedEvents.first?.id, initialId)
         XCTAssertEqual(spy.endedEvents.first?.durationMs, 10_000)
     }
+
+    func testApplySessionConfigPassesTimeoutToManager() {
+        let manager = SessionManager(uptime: { 0 })
+        ARTracker.applySessionConfig(ARTrackerConfig(sessionTimeout: 60), to: manager)
+        XCTAssertEqual(manager.idleTimeout, 60)
+    }
+
+    func testApplySessionConfigWithDefaultConfigKeepsThirtyMinutes() {
+        let manager = SessionManager(uptime: { 0 }, idleTimeout: 60)
+        ARTracker.applySessionConfig(ARTrackerConfig(), to: manager)
+        XCTAssertEqual(manager.idleTimeout, 1800)
+    }
 }
 
