@@ -44,5 +44,33 @@ final class ConfigTests: XCTestCase {
         let jsonString = String(data: data, encoding: .utf8) ?? ""
         XCTAssertTrue(jsonString.contains("\"type\":\"perf\""))
     }
+
+    func testSessionTimeoutDefaultsToThirtyMinutes() {
+        XCTAssertEqual(ARTrackerConfig().sessionTimeout, 1800)
+        XCTAssertEqual(ARTrackerConfig.defaultSessionTimeout, 1800)
+    }
+
+    func testSessionTimeoutKeepsCustomValue() {
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: 900).sessionTimeout, 900)
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: 1).sessionTimeout, 1)
+    }
+
+    func testSessionTimeoutBelowMinimumIsClamped() {
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: 0).sessionTimeout, 1)
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: -5).sessionTimeout, 1)
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: 0.5).sessionTimeout, 1)
+    }
+
+    func testSessionTimeoutNonFiniteFallsBackToDefault() {
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: .nan).sessionTimeout, 1800)
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: .infinity).sessionTimeout, 1800)
+        XCTAssertEqual(ARTrackerConfig(sessionTimeout: -.infinity).sessionTimeout, 1800)
+    }
+
+    func testSessionTimeoutIsMutableAfterInit() {
+        var config = ARTrackerConfig()
+        config.sessionTimeout = 120
+        XCTAssertEqual(config.sessionTimeout, 120)
+    }
 }
 
