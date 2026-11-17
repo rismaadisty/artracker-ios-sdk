@@ -104,5 +104,35 @@ final class ScreenCapturerTests: XCTestCase {
 
         capturer.stop()
     }
+
+    @MainActor
+    func testMaskFailureDropsFrame() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let label = UILabel(frame: CGRect(x: 10, y: 10, width: 100, height: 30))
+        label.text = "Secret"
+        window.addSubview(label)
+        window.isHidden = false
+
+        let capturer = ScreenCapturer(quality: .standard, fps: 2.0, maskAllText: false)
+        capturer.windowProvider = { [window] }
+        capturer.isAppActive = { true }
+
+        struct MaskCollectionError: Error {}
+        capturer.maskCollector = { _, _ in
+            throw MaskCollectionError()
+        }
+
+        var capturedFrames: [ScreenFramePayload] = []
+        capturer.onFrameCaptured = { frame in
+            capturedFrames.append(frame)
+        }
+
+        capturer.start()
+        capturer.captureImmediate(force: true)
+        capturer.flushEncodeQueueForTesting()
+        capturer.stop()
+
+        XCTAssertTrue(capturedFrames.isEmpty, "Frame must be dropped and never encoded when mask collection throws")
+    }
 }
 #endif

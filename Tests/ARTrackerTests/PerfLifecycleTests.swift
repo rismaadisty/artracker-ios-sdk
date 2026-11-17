@@ -82,7 +82,7 @@ final class PerfLifecycleTests: XCTestCase {
         let queue = DiskQueue(databaseURL: dbURL)
         ARTracker.shared._testInstallPerfMonitor(nil, queue: queue)
         SessionManager.shared.listener = ARTracker.shared
-        _ = queue.dequeue(limit: 50)
+        queue.purge()
 
         let initialSession = SessionManager.shared.sessionId
 

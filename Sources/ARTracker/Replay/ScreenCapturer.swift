@@ -38,6 +38,7 @@ public final class ScreenCapturer {
         UIApplication.shared.applicationState == .active
     }
     internal var windowProvider: (() -> [UIWindow])? = nil
+    internal var maskCollector: (UIWindow, Bool) throws -> [CGRect] = MaskingRules.collectMaskRects
     internal func flushEncodeQueueForTesting() {
         encodeQueue.sync {}
     }
@@ -282,7 +283,7 @@ public final class ScreenCapturer {
             // 3. Collect and paint all masked view rects
             do {
                 for window in windows {
-                    let rects = MaskingRules.collectMaskRects(in: window, maskAllText: self.maskAllText)
+                    let rects = try self.maskCollector(window, self.maskAllText)
                     for rect in rects {
                         let canvasRect = primaryWindow.convert(rect, from: window)
                         let clipped = canvasRect.intersection(canvasBounds)

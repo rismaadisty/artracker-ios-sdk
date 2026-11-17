@@ -240,7 +240,7 @@ final class ReplayTests: XCTestCase {
         XCTAssertTrue(queue.shouldHalveFps())
     }
 
-    func testMaskingRulesExtendedForSensitiveContent() {
+    func testMaskingRulesExtendedForSensitiveContent() throws {
         XCTAssertEqual(MaskingRules.maskText("secret123"), "*********")
         XCTAssertEqual(MaskingRules.maskText(""), "")
         XCTAssertEqual(MaskingRules.maskText(nil), "")
@@ -262,7 +262,7 @@ final class ReplayTests: XCTestCase {
         child.artrackerMasked = true
         window.addSubview(child)
 
-        let rects = MaskingRules.collectMaskRects(in: window, maskAllText: false)
+        let rects = try MaskingRules.collectMaskRects(in: window, maskAllText: false)
         XCTAssertEqual(rects.count, 1)
         XCTAssertEqual(rects.first, CGRect(x: 10, y: 10, width: 100, height: 50))
         #endif
