@@ -358,4 +358,64 @@ final class ReplayTests: XCTestCase {
         XCTAssertEqual(decoded.frames.count, 2)
         XCTAssertEqual(decoded.touches.count, 2)
     }
+
+    func testOfflineQueueDropsOldestChunksFirstWhenExceedingCap() throws {
+        XCTAssertEqual(ReplayDiskQueue.defaultMaxDiskBytes, 50 * 1024 * 1024)
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Gunakan cap 2.000 bytes untuk menguji mekanisme pruning oldest-first secara cepat
+        let queue = ReplayDiskQueue(customDirectory: tempDir, maxDiskBytes: 2_000)
+        let payloadData = Data(repeating: 0x41, count: 500)
+
+        let itemOldest = ReplayQueueItem(
+            id: "oldest",
+            seq: 0,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 1000,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-17T00:00:00Z",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            data: payloadData
+        )
+        let itemMiddle = ReplayQueueItem(
+            id: "middle",
+            seq: 1,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 2000,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-17T00:00:00Z",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+            data: payloadData
+        )
+        let itemNewest = ReplayQueueItem(
+            id: "newest",
+            seq: 2,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 3000,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-17T00:00:00Z",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_020),
+            data: payloadData
+        )
+
+        queue.enqueue(itemOldest)
+        queue.enqueue(itemMiddle)
+        queue.enqueue(itemNewest) // Total > 1.500 bytes -> itemOldest harus terhapus otomatis!
+
+        let firstRemaining = try XCTUnwrap(queue.peekNext())
+        XCTAssertEqual(firstRemaining.id, "middle")
+        queue.remove(id: "middle")
+
+        let secondRemaining = try XCTUnwrap(queue.peekNext())
+        XCTAssertEqual(secondRemaining.id, "newest")
+    }
 }
