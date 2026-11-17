@@ -133,12 +133,18 @@ public final class ReplayEngine: @unchecked Sendable {
             guard let self = self else { return }
             switch result {
             case .success(let config):
+                let wasDisabled = (UserDefaults.standard.object(forKey: "artracker.replay.screenshot_enabled") as? Bool == false)
                 UserDefaults.standard.set(config.screenshotEnabled, forKey: "artracker.replay.screenshot_enabled")
                 DispatchQueue.main.async {
                     if let maxFps = config.maxFps {
                         self.screenCapturer?.updateFpsCap(maxFps)
                     }
-                    if !config.screenshotEnabled {
+                    if config.screenshotEnabled {
+                        if wasDisabled {
+                            self.screenCapturer?.start()
+                            self.screenCapturer?.captureImmediate(triggerReason: "session.start", force: true)
+                        }
+                    } else {
                         self.screenCapturer?.stop()
                     }
                 }
@@ -231,8 +237,11 @@ public final class ReplayEngine: @unchecked Sendable {
             }
         }
         self.screenCapturer = capturer
-        capturer.start()
-        capturer.captureImmediate(triggerReason: "session.start")
+        let isCachedDisabled = (UserDefaults.standard.object(forKey: "artracker.replay.screenshot_enabled") as? Bool == false)
+        if !isCachedDisabled {
+            capturer.start()
+            capturer.captureImmediate(triggerReason: "session.start")
+        }
 
         self.applyGovernorState(now: startNow)
         self.scheduleNextTransition()
@@ -241,14 +250,16 @@ public final class ReplayEngine: @unchecked Sendable {
         self.setupWindowObserver()
         self.setupAppLifecycleObservers()
 
-        let delayedItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                guard let self = self, self.governor?.state == .active else { return }
-                self.screenCapturer?.captureImmediate(triggerReason: "session.start.delayed")
+        if !isCachedDisabled {
+            let delayedItem = DispatchWorkItem { [weak self] in
+                Task { @MainActor in
+                    guard let self = self, self.governor?.state == .active else { return }
+                    self.screenCapturer?.captureImmediate(triggerReason: "session.start.delayed")
+                }
             }
+            self.delayedStartWorkItem = delayedItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: delayedItem)
         }
-        self.delayedStartWorkItem = delayedItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: delayedItem)
     }
 
     @MainActor
@@ -514,6 +525,7 @@ public final class ReplayEngine: @unchecked Sendable {
             }
             observerTokens.removeAll()
             TouchTracker.shared.setGestureHandler(nil)
+            UserDefaults.standard.removeObject(forKey: "artracker.replay.screenshot_enabled")
         }
         #endif
     }

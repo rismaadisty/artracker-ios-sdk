@@ -291,4 +291,71 @@ final class ReplayTests: XCTestCase {
         XCTAssertEqual(decodedUp, up)
         XCTAssertEqual(decodedUp.kind, "up")
     }
+
+    func testProducedGzipChunkDecompressesAndMatchesContractWithFramesAndTouches() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        final class CapturingUploader: ReplayUploading, @unchecked Sendable {
+            var uploadedGzipData: Data?
+            var ackedEventCount: Int?
+            var requestedFormat: String?
+
+            func fetchReplayConfig(completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void) {
+                completion(.success(ReplayRemoteConfig(screenshotEnabled: true, maxFps: 2.0)))
+            }
+            func requestChunkUrl(
+                sessionId: String, chunkSeq: Int, sizeBytes: Int, userId: String?,
+                environment: String, startTime: String, format: String,
+                completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+            ) {
+                requestedFormat = format
+                completion(.success((URL(string: "https://example.com/upload")!, "key_\(chunkSeq)")))
+            }
+            func uploadGzipData(uploadUrl: URL, gzipData: Data, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+                uploadedGzipData = gzipData
+                completion(.success(()))
+            }
+            func acknowledgeChunk(
+                sessionId: String, chunkSeq: Int, sizeBytes: Int, durationMs: Double,
+                eventCount: Int, hasError: Bool, hasRageClick: Bool,
+                completion: @escaping @Sendable (Result<Void, Error>) -> Void
+            ) {
+                ackedEventCount = eventCount
+                completion(.success(()))
+            }
+        }
+
+        let spy = CapturingUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "production",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_contract" }
+        )
+
+        manager.appendScreenFrame(ScreenFramePayload(ts: 100, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: "dGVzdA==", masked: true))
+        manager.appendScreenFrame(ScreenFramePayload(ts: 200, screen: "Detail", w: 720, h: 1280, vw: 360, vh: 640, data: "dGVzdDI=", masked: false))
+        manager.appendScreenTouch(ScreenTouchPoint(ts: 150, x: 120, y: 240, kind: "down"))
+        manager.appendScreenTouch(ScreenTouchPoint(ts: 180, x: 120, y: 240, kind: "up"))
+
+        let exp = expectation(description: "flush")
+        manager.flush { exp.fulfill() }
+        wait(for: [exp], timeout: 5.0)
+
+        XCTAssertEqual(spy.requestedFormat, "artracker-screen-v1")
+        XCTAssertEqual(spy.ackedEventCount, 4) // 2 frames + 2 touches
+
+        let gzipData = try XCTUnwrap(spy.uploadedGzipData)
+        XCTAssertTrue(Gzip.isGzip(data: gzipData))
+        let rawJson = try Gzip.decompress(data: gzipData)
+        let decoded = try JSONDecoder().decode(ScreenChunkPayload.self, from: rawJson)
+        XCTAssertEqual(decoded.format, "artracker-screen-v1")
+        XCTAssertEqual(decoded.platform, "ios")
+        XCTAssertEqual(decoded.seq, 0)
+        XCTAssertEqual(decoded.frames.count, 2)
+        XCTAssertEqual(decoded.touches.count, 2)
+    }
 }

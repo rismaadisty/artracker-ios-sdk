@@ -510,5 +510,30 @@ final class ReplayLifecycleTests: XCTestCase {
         // Walaupun layar statis (identik), sesi baru WAJIB menangkap minimal 1 frame baru (tidak di-drop lastFrameHash)
         XCTAssertGreaterThan(ReplayEngine.shared.capturedFrameCountForTesting, countBeforeBackground)
     }
+
+    @MainActor
+    func testCachedScreenshotDisabledPreventsStartupCapture() {
+        UserDefaults.standard.set(false, forKey: "artracker.replay.screenshot_enabled")
+        defer { UserDefaults.standard.removeObject(forKey: "artracker.replay.screenshot_enabled") }
+
+        let clockBox = ClockBox()
+        let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
+        let uploader = ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "test")
+        let window = createTestWindow()
+
+        ReplayEngine.shared.startForTesting(
+            uploader: uploader,
+            diskQueue: diskQueue,
+            fps: 2.0,
+            idleAfterMs: 1_000,
+            dormantAfterMs: 2_000,
+            clock: { clockBox.nowMs },
+            windowProvider: { [window] },
+            isAppActive: { true }
+        )
+
+        ReplayEngine.shared.flushCapturerForTesting()
+        XCTAssertEqual(ReplayEngine.shared.capturedFrameCountForTesting, 0)
+    }
 }
 #endif
