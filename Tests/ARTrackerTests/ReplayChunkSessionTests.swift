@@ -3,6 +3,71 @@ import XCTest
 
 final class ReplayChunkSessionTests: XCTestCase {
 
+    final class SpyReplayUploader: ReplayUploading, @unchecked Sendable {
+        private let lock = NSLock()
+        var requestedChunks: [(sessionId: String, seq: Int, startTime: String)] = []
+        var ackedChunks: [(sessionId: String, seq: Int, durationMs: Double)] = []
+        var requestChunkUrlCallCount: Int = 0
+        var shouldReturnScreenshotDisabled: Bool = false
+        var simulatedRetryAfterSeconds: TimeInterval? = nil
+
+        func fetchReplayConfig(completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void) {
+            completion(.success(ReplayRemoteConfig(screenshotEnabled: true, maxFps: 2.0)))
+        }
+
+        func requestChunkUrl(
+            sessionId: String,
+            chunkSeq: Int,
+            sizeBytes: Int,
+            userId: String?,
+            environment: String,
+            startTime: String,
+            format: String = "artracker-mobile-v1",
+            completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+        ) {
+            lock.withLock {
+                requestChunkUrlCallCount += 1
+                requestedChunks.append((sessionId: sessionId, seq: chunkSeq, startTime: startTime))
+            }
+
+            if shouldReturnScreenshotDisabled {
+                completion(.failure(ReplayUploadError.screenshotDisabled))
+                return
+            }
+
+            if let retry = simulatedRetryAfterSeconds {
+                completion(.failure(ReplayUploadError.httpError(statusCode: 429, message: "Too Many Requests", retryAfter: retry)))
+                return
+            }
+
+            completion(.success((URL(string: "https://example.com/upload")!, "key_\(chunkSeq)")))
+        }
+
+        func uploadGzipData(
+            uploadUrl: URL,
+            gzipData: Data,
+            completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        ) {
+            completion(.success(()))
+        }
+
+        func acknowledgeChunk(
+            sessionId: String,
+            chunkSeq: Int,
+            sizeBytes: Int,
+            durationMs: Double,
+            eventCount: Int,
+            hasError: Bool,
+            hasRageClick: Bool,
+            completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        ) {
+            lock.withLock {
+                ackedChunks.append((sessionId: sessionId, seq: chunkSeq, durationMs: durationMs))
+            }
+            completion(.success(()))
+        }
+    }
+
     final class StubReplayUploader: ReplayUploading, @unchecked Sendable {
         private let lock = NSLock()
         var requestedSessionIds: [String] = []
@@ -75,6 +140,116 @@ final class ReplayChunkSessionTests: XCTestCase {
             mime: "image/jpeg",
             data: "dGVzdA=="
         )
+    }
+
+    private func flushAndWait(_ manager: ReplayChunkManager) {
+        let exp = expectation(description: "flush")
+        manager.flush {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 5.0)
+    }
+
+    private func makeDummyFrame(ts: Int64 = 1_000_000) -> ScreenFramePayload {
+        makeSampleFrame(ts: ts)
+    }
+
+    func testAckDurationIsCumulativeAcrossMultipleChunks() throws {
+        final class FakeClock: @unchecked Sendable {
+            var uptime: TimeInterval = 1_000.0
+            var date: Date = Date(timeIntervalSince1970: 1_700_000_000)
+        }
+        let clock = FakeClock()
+        let spy = SpyReplayUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_cumulative_1" },
+            uptimeProvider: { clock.uptime },
+            dateProvider: { clock.date }
+        )
+
+        // Chunk 0 pada t = +10s
+        manager.appendScreenFrame(makeDummyFrame(ts: 1000))
+        clock.uptime = 1_010.0
+        flushAndWait(manager)
+
+        // Chunk 1 pada t = +20s
+        manager.appendScreenFrame(makeDummyFrame(ts: 2000))
+        clock.uptime = 1_020.0
+        flushAndWait(manager)
+
+        // Chunk 2 pada t = +30s
+        manager.appendScreenFrame(makeDummyFrame(ts: 3000))
+        clock.uptime = 1_030.0
+        flushAndWait(manager)
+
+        XCTAssertEqual(spy.ackedChunks.count, 3)
+        XCTAssertEqual(spy.ackedChunks[0].seq, 0)
+        XCTAssertEqual(spy.ackedChunks[0].durationMs, 10_000, accuracy: 1.0)
+        XCTAssertEqual(spy.ackedChunks[1].seq, 1)
+        XCTAssertEqual(spy.ackedChunks[1].durationMs, 20_000, accuracy: 1.0)
+        XCTAssertEqual(spy.ackedChunks[2].seq, 2)
+        XCTAssertEqual(spy.ackedChunks[2].durationMs, 30_000, accuracy: 1.0)
+    }
+
+    func testSessionRotationResetsSeqDurationAndStartTime() throws {
+        final class FakeState: @unchecked Sendable {
+            var sessionId = "ses_first"
+            var uptime: TimeInterval = 500.0
+            var date: Date = Date(timeIntervalSince1970: 1_700_000_000)
+        }
+        let state = FakeState()
+        let spy = SpyReplayUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { state.sessionId },
+            uptimeProvider: { state.uptime },
+            dateProvider: { state.date }
+        )
+
+        // Sesi pertama: 2 chunk
+        manager.appendScreenFrame(makeDummyFrame(ts: 1))
+        state.uptime = 510.0
+        flushAndWait(manager)
+
+        manager.appendScreenFrame(makeDummyFrame(ts: 2))
+        state.uptime = 525.0
+        flushAndWait(manager)
+
+        // Idle 40 menit -> rotasi ke sesi kedua pada uptime = 3000.0
+        state.uptime = 3_000.0
+        let secondSessionDate = Date(timeIntervalSince1970: 1_700_002_400)
+        state.date = secondSessionDate
+        state.sessionId = "ses_second"
+
+        manager.appendScreenFrame(makeDummyFrame(ts: 3))
+        state.uptime = 3_012.0
+        flushAndWait(manager)
+
+        XCTAssertEqual(spy.ackedChunks.count, 3)
+        // Sesi pertama chunk 0 & 1
+        XCTAssertEqual(spy.ackedChunks[0].sessionId, "ses_first")
+        XCTAssertEqual(spy.ackedChunks[0].seq, 0)
+        XCTAssertEqual(spy.ackedChunks[0].durationMs, 10_000, accuracy: 1.0)
+        XCTAssertEqual(spy.ackedChunks[1].sessionId, "ses_first")
+        XCTAssertEqual(spy.ackedChunks[1].seq, 1)
+        XCTAssertEqual(spy.ackedChunks[1].durationMs, 25_000, accuracy: 1.0)
+
+        // Sesi kedua harus mulai kembali dari seq = 0 dan durasi 12_000 ms (bukan 2_512_000 ms)
+        XCTAssertEqual(spy.ackedChunks[2].sessionId, "ses_second")
+        XCTAssertEqual(spy.ackedChunks[2].seq, 0)
+        XCTAssertEqual(spy.ackedChunks[2].durationMs, 12_000, accuracy: 1.0)
+
+        let expectedStartTime = ISO8601DateFormatter().string(from: secondSessionDate)
+        XCTAssertEqual(spy.requestedChunks.last?.startTime, expectedStartTime)
     }
 
     func testChunkUploadedUnderRecordingSession() {

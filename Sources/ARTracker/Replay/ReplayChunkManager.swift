@@ -20,10 +20,13 @@ public final class ReplayChunkManager: @unchecked Sendable {
     // Screenshot buffers
     private var screenFrameBuffer: [ScreenFramePayload] = []
     private var screenTouchBuffer: [ScreenTouchPoint] = []
+    private var activeSessionId: String? = nil
     private var currentChunkSessionId: String? = nil
 
-    private var chunkStartTime: Date = Date()
-    private var chunkStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private let uptimeProvider: @Sendable () -> TimeInterval
+    private let dateProvider: @Sendable () -> Date
+    private var sessionStartTime: Date
+    private var sessionStartUptime: TimeInterval
     private var hasError: Bool = false
     private var hasRageClick: Bool = false
     private var flushTimer: DispatchSourceTimer?
@@ -39,13 +42,19 @@ public final class ReplayChunkManager: @unchecked Sendable {
         environment: String,
         wifiOnly: Bool = false,
         diskQueue: ReplayDiskQueue = ReplayDiskQueue(),
-        sessionIdProvider: @escaping @Sendable () -> String = { SessionManager.shared.peekSessionId() ?? SessionManager.shared.sessionId }
+        sessionIdProvider: @escaping @Sendable () -> String = { SessionManager.shared.peekSessionId() ?? SessionManager.shared.sessionId },
+        uptimeProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        dateProvider: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.uploader = uploader
         self.environment = environment
         self.wifiOnly = wifiOnly
         self.diskQueue = diskQueue
         self.sessionIdProvider = sessionIdProvider
+        self.uptimeProvider = uptimeProvider
+        self.dateProvider = dateProvider
+        self.sessionStartUptime = uptimeProvider()
+        self.sessionStartTime = dateProvider()
         startFlushTimer()
         processPendingUploads(completion: nil)
     }
@@ -64,17 +73,27 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     // MARK: - Screenshot Appending
 
+    private func prepareSessionLocked(_ currentSession: String) {
+        if let chunkSession = currentChunkSessionId, chunkSession != currentSession {
+            if !screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty {
+                triggerFlushLocked()
+            }
+        }
+        if activeSessionId != currentSession {
+            activeSessionId = currentSession
+            currentChunkSeq = 0
+            sessionStartUptime = uptimeProvider()
+            sessionStartTime = dateProvider()
+        }
+        if currentChunkSessionId == nil {
+            currentChunkSessionId = currentSession
+        }
+    }
+
     public func appendScreenFrame(_ frame: ScreenFramePayload) {
         lock.withLock {
             let currentSession = sessionIdProvider()
-            if (!screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty),
-               let chunkSession = currentChunkSessionId,
-               chunkSession != currentSession {
-                triggerFlushLocked()
-            }
-            if currentChunkSessionId == nil {
-                currentChunkSessionId = currentSession
-            }
+            prepareSessionLocked(currentSession)
             screenFrameBuffer.append(frame)
             if screenFrameBuffer.count >= 20 {
                 triggerFlushLocked()
@@ -85,14 +104,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
     public func appendScreenTouch(_ touch: ScreenTouchPoint) {
         lock.withLock {
             let currentSession = sessionIdProvider()
-            if (!screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty),
-               let chunkSession = currentChunkSessionId,
-               chunkSession != currentSession {
-                triggerFlushLocked()
-            }
-            if currentChunkSessionId == nil {
-                currentChunkSessionId = currentSession
-            }
+            prepareSessionLocked(currentSession)
             screenTouchBuffer.append(touch)
             if screenFrameBuffer.count >= 20 || screenTouchBuffer.count >= 200 {
                 triggerFlushLocked()
@@ -171,9 +183,9 @@ public final class ReplayChunkManager: @unchecked Sendable {
         let chunkSession = currentChunkSessionId ?? sessionIdProvider()
         currentChunkSessionId = nil
 
-        let nowUptime = ProcessInfo.processInfo.systemUptime
-        let durationMs = max(100.0, (nowUptime - chunkStartUptime) * 1000.0)
-        let sTime = ISO8601DateFormatter().string(from: chunkStartTime)
+        let nowUptime = uptimeProvider()
+        let durationMs = max(100.0, (nowUptime - sessionStartUptime) * 1000.0)
+        let sTime = ISO8601DateFormatter().string(from: sessionStartTime)
         let chunkHasErr = hasError
         let chunkHasRage = hasRageClick
 
@@ -182,8 +194,6 @@ public final class ReplayChunkManager: @unchecked Sendable {
         screenFrameBuffer.removeAll(keepingCapacity: true)
         screenTouchBuffer.removeAll(keepingCapacity: true)
 
-        chunkStartTime = Date()
-        chunkStartUptime = nowUptime
         hasError = false
         hasRageClick = false
 
