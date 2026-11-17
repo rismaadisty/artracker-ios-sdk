@@ -232,5 +232,46 @@ final class ScreenCapturerTests: XCTestCase {
         XCTAssertLessThan(pixel.g, 80)
         XCTAssertLessThan(pixel.b, 90)
     }
+
+    @MainActor
+    func testWatchdogHalvesFpsAfterThreeSlowCapturesAndRecoversAfterTenSeconds() {
+        let capturer = ScreenCapturer(quality: .standard, fps: 4.0)
+        XCTAssertEqual(capturer.effectiveFps, 4.0)
+        XCTAssertEqual(capturer.targetFps, 4.0)
+
+        // 2 slow captures (> 16ms): belum menurunkan FPS
+        capturer.handleWatchdog(captureElapsed: 0.020, now: 100.0)
+        capturer.handleWatchdog(captureElapsed: 0.020, now: 100.5)
+        XCTAssertEqual(capturer.effectiveFps, 4.0)
+
+        // Slow capture ke-3 berturut-turut -> effectiveFps turun separuh menjadi 2.0, targetFps tetap 4.0
+        capturer.handleWatchdog(captureElapsed: 0.020, now: 101.0)
+        XCTAssertEqual(capturer.effectiveFps, 2.0)
+        XCTAssertEqual(capturer.targetFps, 4.0)
+
+        // Capture cepat sebelum 10 detik (t = 105.0) -> belum pulih
+        capturer.handleWatchdog(captureElapsed: 0.005, now: 105.0)
+        XCTAssertEqual(capturer.effectiveFps, 2.0)
+
+        // Capture cepat setelah >= 10 detik tanpa slow capture (t = 111.1) -> pulih ke targetFps (4.0)
+        capturer.handleWatchdog(captureElapsed: 0.005, now: 111.1)
+        XCTAssertEqual(capturer.effectiveFps, 4.0)
+    }
+
+    @MainActor
+    func testHalveEffectiveFpsPreservesTargetFpsAndClampsAtHalfFps() {
+        let capturer = ScreenCapturer(quality: .high, fps: 2.0)
+        capturer.halveEffectiveFps()
+        XCTAssertEqual(capturer.effectiveFps, 1.0)
+        XCTAssertEqual(capturer.targetFps, 2.0)
+
+        capturer.halveEffectiveFps()
+        XCTAssertEqual(capturer.effectiveFps, 0.5)
+
+        // Tidak boleh turun di bawah 0.5 FPS
+        capturer.halveEffectiveFps()
+        XCTAssertEqual(capturer.effectiveFps, 0.5)
+        XCTAssertEqual(capturer.targetFps, 2.0)
+    }
 }
 #endif

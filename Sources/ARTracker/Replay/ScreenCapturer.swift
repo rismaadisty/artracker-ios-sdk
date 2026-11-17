@@ -88,6 +88,16 @@ public final class ScreenCapturer {
         }
     }
 
+    public func halveEffectiveFps() {
+        let newFps = max(0.5, effectiveFps / 2.0)
+        if newFps != effectiveFps {
+            effectiveFps = newFps
+            if isRunning && !isPaused {
+                restartTimer()
+            }
+        }
+    }
+
     public func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -390,11 +400,10 @@ public final class ScreenCapturer {
 
     // MARK: - Watchdog
 
-    private func handleWatchdog(captureElapsed: TimeInterval) {
-        let nowUptime = ProcessInfo.processInfo.systemUptime
+    internal func handleWatchdog(captureElapsed: TimeInterval, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         if captureElapsed > 0.016 { // > 16ms of main-thread time
             slowCaptureCount += 1
-            lastSlowCaptureUptime = nowUptime
+            lastSlowCaptureUptime = now
             if slowCaptureCount >= 3 {
                 // Halve fps (min 0.5)
                 let newFps = max(0.5, effectiveFps / 2.0)
@@ -406,7 +415,7 @@ public final class ScreenCapturer {
             }
         } else {
             // Restore fps after 10s without a slow capture
-            if effectiveFps < targetFps && (nowUptime - lastSlowCaptureUptime >= 10.0) {
+            if effectiveFps < targetFps && (now - lastSlowCaptureUptime >= 10.0) {
                 effectiveFps = targetFps
                 restartTimer()
             }

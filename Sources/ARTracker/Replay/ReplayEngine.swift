@@ -93,7 +93,7 @@ public final class ReplayEngine: @unchecked Sendable {
             Task { @MainActor in
                 guard let capturer = self?.screenCapturer else { return }
                 if shouldHalveFps {
-                    capturer.updateFpsCap(max(0.5, capturer.effectiveFps / 2.0))
+                    capturer.halveEffectiveFps()
                 }
                 if shouldStepDownQuality {
                     capturer.quality = capturer.quality.lowerPreset
