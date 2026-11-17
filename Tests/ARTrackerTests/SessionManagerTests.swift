@@ -288,5 +288,147 @@ final class SessionManagerTests: XCTestCase {
         manager.recordUserActivity()
         XCTAssertNotEqual(manager.sessionId, initialId)
     }
+
+    func testDefaultIdleTimeoutIsThirtyMinutes() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now })
+        XCTAssertEqual(manager.idleTimeout, 1800)
+        let id = manager.sessionId
+        clock.now = 1800
+        manager.recordUserActivity()
+        XCTAssertEqual(manager.sessionId, id)      // tepat di batas timeout: sesi dipertahankan, aktivitas di-refresh
+        clock.now = 1800 + 1801
+        XCTAssertTrue(manager.isExpired)
+        manager.recordUserActivity()
+        XCTAssertNotEqual(manager.sessionId, id)
+    }
+
+    func testCustomIdleTimeoutRotatesAfterItElapses() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now }, idleTimeout: 60)
+        let id = manager.sessionId
+        clock.now = 59
+        manager.recordUserActivity()
+        XCTAssertEqual(manager.sessionId, id)
+        clock.now = 59 + 61
+        XCTAssertTrue(manager.isExpired)
+        manager.recordUserActivity()
+        XCTAssertNotEqual(manager.sessionId, id)
+    }
+
+    func testConfigureChangesTimeoutForNextCheck() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now })
+        let id = manager.sessionId
+        manager.configure(idleTimeout: 60)
+        XCTAssertEqual(manager.idleTimeout, 60)
+        clock.now = 61
+        XCTAssertTrue(manager.isExpired)
+        manager.recordUserActivity()
+        XCTAssertNotEqual(manager.sessionId, id)
+    }
+
+    func testConfigureClampsBelowMinimum() {
+        let manager = SessionManager(uptime: { 0 })
+        manager.configure(idleTimeout: 0)
+        XCTAssertEqual(manager.idleTimeout, 1)
+        manager.configure(idleTimeout: .infinity)
+        XCTAssertEqual(manager.idleTimeout, 1800)
+    }
+
+    func testPeekUsesCustomTimeoutWithoutRotating() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now }, idleTimeout: 60)
+        let id = manager.sessionId
+        clock.now = 61
+        XCTAssertNil(manager.peekSessionId())
+        XCTAssertNil(manager.peekSessionId())       // peek tidak pernah memutar atau me-refresh sesi
+        XCTAssertEqual(manager.sessionId, id)       // pure read tetap mengembalikan id sebelum ada aktivitas
+        manager.recordUserActivity()
+        XCTAssertNotEqual(manager.sessionId, id)
+    }
+
+    func testForegroundAfterTimeoutStartsNewSession() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now }, idleTimeout: 60)
+        let id = manager.sessionId
+        clock.now = 61
+        manager.onForeground()
+        let afterForeground = manager.peekSessionId()
+        XCTAssertNotNil(afterForeground)
+        XCTAssertNotEqual(afterForeground, id)
+    }
+
+    func testForegroundWithinTimeoutKeepsSessionAndRefreshesActivity() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now }, idleTimeout: 60)
+        let id = manager.sessionId
+        clock.now = 50
+        manager.onForeground()
+        clock.now = 100                              // 50 dtk setelah foreground, 100 dtk sejak start
+        XCTAssertEqual(manager.peekSessionId(), id)
+    }
+
+    func testForegroundAtExactTimeoutKeepsSession() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now }, idleTimeout: 60)
+        let id = manager.sessionId
+        clock.now = 60
+        manager.onForeground()
+        XCTAssertEqual(manager.peekSessionId(), id)
+    }
+
+    func testRotateStillWorksWithCustomTimeout() {
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 0 }
+        let clock = FakeClock()
+        let manager = SessionManager(uptime: { clock.now }, idleTimeout: 60)
+        let id = manager.sessionId
+        let rotated = manager.rotateSession()
+        XCTAssertNotEqual(rotated, id)
+        clock.now = 30
+        XCTAssertEqual(manager.sessionId, rotated)
+    }
+
+    func testConfigureReevaluatesRestoredSessionAgainstNewTimeout() {
+        let suiteName = "test.session.reconfig.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        final class FakeClock: @unchecked Sendable { var now: TimeInterval = 1_000_000 }
+        final class ListenerSpy: SessionLifecycleListener, @unchecked Sendable {
+            var endedEvents: [(id: String, durationMs: Double)] = []
+            var startedIds: [String] = []
+            func sessionDidStart(id: String) { startedIds.append(id) }
+            func sessionDidEnd(id: String, durationMs: Double) { endedEvents.append((id, durationMs)) }
+        }
+
+        let clock = FakeClock()
+        let manager1 = SessionManager(clock: { clock.now }, userDefaults: defaults)
+        let initialId = manager1.sessionId
+        clock.now += 10
+        manager1.recordUserActivity()
+        manager1.persistSession(forced: true)
+
+        // Relaunch 120 detik kemudian (< default 1800, tetapi > custom timeout 60)
+        clock.now += 120
+        let manager2 = SessionManager(clock: { clock.now }, userDefaults: defaults)
+        // Sebelum configure(60), gdyby memakai 1800 sesi masih dianggap valid;
+        // Begitu configure(idleTimeout: 60) dipanggil, sesi lama harus dievaluasi ulang dan dirotasi!
+        manager2.configure(idleTimeout: 60)
+        let spy = ListenerSpy()
+        manager2.listener = spy
+
+        XCTAssertNotEqual(manager2.sessionId, initialId)
+        XCTAssertEqual(spy.endedEvents.count, 1)
+        XCTAssertEqual(spy.endedEvents.first?.id, initialId)
+        XCTAssertEqual(spy.endedEvents.first?.durationMs, 10_000)
+    }
 }
 
