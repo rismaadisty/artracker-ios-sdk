@@ -73,6 +73,7 @@ struct MyApp: App {
                 maskAllText: false,
                 wifiOnly: false,      // default: false (mengizinkan seluler & Wi-Fi)
                 flushInterval: 30,    // interval flush rutin dalam detik
+                sessionTimeout: 1800, // idle timeout sesi dalam detik (default 30 menit)
                 debugLogging: false
             )
         )
@@ -133,10 +134,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 | `environment` | `String` | `"production"` | Lingkungan aplikasi (`"production"`, `"staging"`, `"development"`). |
 | `enableNetworkCapture`| `Bool` | `true` | Merekam performa panggilan HTTP via `URLSession`. |
 | `instrumentAllSessions` | `Bool` | `true` | Melakukan swizzling konfigurasi session default/ephemeral untuk network capture global. |
-| `enableViewCapture` | `Bool` | `true` | Menangkap view tree hierarchy untuk analitik layar dan Session Replay. |
+| `enableViewCapture` | `Bool` | `true` | Mengaktifkan auto-tracking layar (`UIViewController.viewDidAppear`) untuk event `screen.view` dan transisi Session Replay. |
 | `maskAllText` | `Bool` | `false` | Menyamarkan seluruh teks pada view tree (`*`). |
 | `wifiOnly` | `Bool` | `false` | Hanya mengunggah data saat terhubung ke Wi-Fi. Default `false` mengizinkan jaringan seluler. |
 | `flushInterval` | `TimeInterval`| `30.0` | Interval berkala (detik) pengiriman batch item dari disk queue ke backend. |
+| `sessionTimeout` | `TimeInterval` | `1800` | Sesi baru dimulai pada aktivitas berikutnya atau saat app kembali ke foreground setelah idle lebih lama dari nilai ini (detik). Minimum 1; nilai non-finite memakai default. Padanan Android: `sessionTimeoutMs` (milidetik). |
 | `maxBatchItems` | `Int` | `50` | Maksimum item yang digabungkan dalam satu request upload (maks 100). |
 | `debugLogging` | `Bool` | `false` | Menampilkan log internal SDK via OSLog di console debugger. |
 | `enablePerformanceMonitoring` | `Bool` | `false` | Mengaktifkan sampling performa foreground (CPU, RAM, FPS, jank, threads, thermal). |
