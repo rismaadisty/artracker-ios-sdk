@@ -41,3 +41,9 @@ public struct BackoffStrategy: Sendable {
     }
 }
 
+public enum Backoff {
+    public static func parseRetryAfter(_ header: String?) -> TimeInterval? {
+        BackoffStrategy().parseRetryAfter(header: header)
+    }
+}
+

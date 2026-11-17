@@ -252,6 +252,78 @@ final class ReplayChunkSessionTests: XCTestCase {
         XCTAssertEqual(spy.requestedChunks.last?.startTime, expectedStartTime)
     }
 
+    func testScreenshotDisabledClearsQueueAndIgnoresSubsequentFramesAndTouches() {
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            var value = 0
+            func inc() { lock.withLock { value += 1 } }
+        }
+        let counter = Counter()
+        let spy = SpyReplayUploader()
+        spy.shouldReturnScreenshotDisabled = true
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_disabled" }
+        )
+        manager.onScreenshotDisabled = {
+            counter.inc()
+        }
+
+        manager.appendScreenFrame(makeDummyFrame(ts: 1))
+        flushAndWait(manager)
+
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertNil(queue.peekNext())
+
+        // Setelah screenshot_disabled, touch maupun frame baru tidak boleh masuk antrean lagi
+        spy.shouldReturnScreenshotDisabled = false
+        manager.appendScreenTouch(ScreenTouchPoint(ts: 2, x: 10, y: 20, kind: "down"))
+        manager.appendScreenFrame(makeDummyFrame(ts: 3))
+        flushAndWait(manager)
+
+        XCTAssertNil(queue.peekNext())
+        XCTAssertEqual(spy.ackedChunks.count, 0)
+    }
+
+    func testRetryAfterDelaysSubsequentUploadAttempts() {
+        final class FakeClock: @unchecked Sendable {
+            var uptime: TimeInterval = 100.0
+        }
+        let clock = FakeClock()
+        let spy = SpyReplayUploader()
+        spy.simulatedRetryAfterSeconds = 30.0
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_retry" },
+            uptimeProvider: { clock.uptime }
+        )
+
+        manager.appendScreenFrame(makeDummyFrame(ts: 1))
+        flushAndWait(manager) // Gagal dengan Retry-After: 30s
+        XCTAssertEqual(spy.ackedChunks.count, 0)
+        let attemptsAfterFirstTry = spy.requestChunkUrlCallCount
+
+        // Pada t = +10s (masih dalam masa Retry-After 30s), flush tidak boleh memanggil requestChunkUrl
+        spy.simulatedRetryAfterSeconds = nil
+        clock.uptime = 110.0
+        flushAndWait(manager)
+        XCTAssertEqual(spy.requestChunkUrlCallCount, attemptsAfterFirstTry)
+        XCTAssertEqual(spy.ackedChunks.count, 0)
+
+        // Pada t = +31s (lewat masa Retry-After), flush berhasil mengunggah chunk
+        clock.uptime = 131.0
+        flushAndWait(manager)
+        XCTAssertEqual(spy.ackedChunks.count, 1)
+    }
+
     func testChunkUploadedUnderRecordingSession() {
         let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
         let stubUploader = StubReplayUploader()

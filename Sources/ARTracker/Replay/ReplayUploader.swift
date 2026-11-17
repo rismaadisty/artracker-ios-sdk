@@ -126,7 +126,8 @@ public final class ReplayUploader: ReplayUploading, @unchecked Sendable {
 
             guard (200...299).contains(http.statusCode), let data = data else {
                 let msg = data.flatMap { String(data: $0, encoding: .utf8) }
-                completion(.failure(ReplayUploadError.httpError(statusCode: http.statusCode, message: msg, retryAfter: nil)))
+                let retrySeconds = Backoff.parseRetryAfter(http.value(forHTTPHeaderField: "Retry-After"))
+                completion(.failure(ReplayUploadError.httpError(statusCode: http.statusCode, message: msg, retryAfter: retrySeconds)))
                 return
             }
 
@@ -200,8 +201,7 @@ public final class ReplayUploader: ReplayUploading, @unchecked Sendable {
 
             guard let http = http, (200...299).contains(http.statusCode), let data = data else {
                 let msg = data.flatMap { String(data: $0, encoding: .utf8) }
-                let retryAfterStr = http?.value(forHTTPHeaderField: "Retry-After")
-                let retrySeconds = retryAfterStr.flatMap { Double($0) }
+                let retrySeconds = Backoff.parseRetryAfter(http?.value(forHTTPHeaderField: "Retry-After"))
                 completion(.failure(ReplayUploadError.httpError(statusCode: statusCode, message: msg, retryAfter: retrySeconds)))
                 return
             }

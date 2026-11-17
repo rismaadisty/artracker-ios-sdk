@@ -35,6 +35,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private var flushTimer: DispatchSourceTimer?
     private var oneShotFlushTimer: DispatchSourceTimer?
     private var isFlushing: Bool = false
+    private var isScreenshotDisabled: Bool = false
+    private var retryNotBeforeUptime: TimeInterval = 0
 
     // Callbacks
     public var onScreenshotDisabled: (@Sendable () -> Void)?
@@ -95,6 +97,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     public func appendScreenFrame(_ frame: ScreenFramePayload) {
         lock.withLock {
+            guard !isScreenshotDisabled else { return }
             let currentSession = sessionIdProvider()
             prepareSessionLocked(currentSession)
 
@@ -114,6 +117,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     public func appendScreenTouch(_ touch: ScreenTouchPoint) {
         lock.withLock {
+            guard !isScreenshotDisabled else { return }
             let currentSession = sessionIdProvider()
             prepareSessionLocked(currentSession)
             screenTouchBuffer.append(touch)
@@ -259,6 +263,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
             }
 
             let item = self.lock.withLock { () -> ReplayQueueItem? in
+                guard !self.isScreenshotDisabled else { return nil }
+                guard self.uptimeProvider() >= self.retryNotBeforeUptime else { return nil }
                 guard !self.isFlushing else { return nil }
                 guard let nextItem = self.diskQueue.peekNext() else { return nil }
                 self.isFlushing = true
@@ -331,8 +337,21 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
                 case .failure(let error):
                     if case ReplayUploadError.screenshotDisabled = error {
+                        self.lock.withLock {
+                            self.isScreenshotDisabled = true
+                            self.screenFrameBuffer.removeAll(keepingCapacity: false)
+                            self.screenTouchBuffer.removeAll(keepingCapacity: false)
+                            self.currentBufferBytes = 0
+                        }
+                        self.pauseFlushTimer()
                         self.diskQueue.clearScreenshotChunks()
                         self.onScreenshotDisabled?()
+                    } else if case ReplayUploadError.httpError(_, _, let retryAfter) = error {
+                        if let retry = retryAfter, retry > 0 {
+                            self.lock.withLock {
+                                self.retryNotBeforeUptime = self.uptimeProvider() + retry
+                            }
+                        }
                     }
 
                     self.lock.withLock { self.isFlushing = false }
