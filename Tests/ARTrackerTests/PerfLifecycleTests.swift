@@ -13,6 +13,7 @@ final class PerfLifecycleTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        SessionManager.shared.listener = nil
         ARTracker.shared._testInstallPerfMonitor(nil, queue: nil)
         SessionManager.shared.recordUserActivity()
         if let tempDir = tempDir {
@@ -81,6 +82,7 @@ final class PerfLifecycleTests: XCTestCase {
         let queue = DiskQueue(databaseURL: dbURL)
         ARTracker.shared._testInstallPerfMonitor(nil, queue: queue)
         SessionManager.shared.listener = ARTracker.shared
+        _ = queue.dequeue(limit: 50)
 
         let initialSession = SessionManager.shared.sessionId
 
