@@ -134,5 +134,103 @@ final class ScreenCapturerTests: XCTestCase {
 
         XCTAssertTrue(capturedFrames.isEmpty, "Frame must be dropped and never encoded when mask collection throws")
     }
+
+    private func samplePixelRGB(in cgImage: CGImage, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8) {
+        var pixel: [UInt8] = [0, 0, 0, 0]
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let context = CGContext(
+            data: &pixel,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return (0, 0, 0)
+        }
+        context.draw(cgImage, in: CGRect(x: -x, y: -(cgImage.height - 1 - y), width: cgImage.width, height: cgImage.height))
+        return (pixel[0], pixel[1], pixel[2])
+    }
+
+    @MainActor
+    func testSecureFieldFirstResponderMasksKeyboardArea() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        window.backgroundColor = .white
+        let secureField = UITextField(frame: CGRect(x: 20, y: 40, width: 200, height: 40))
+        secureField.isSecureTextEntry = true
+        window.addSubview(secureField)
+        window.isHidden = false
+
+        let capturer = ScreenCapturer(quality: .standard, fps: 2.0, maskAllText: false)
+        capturer.windowProvider = { [window] }
+        capturer.isAppActive = { true }
+        capturer.isSensitiveFirstResponderChecker = { _, _ in true }
+        // Simulasikan keyboard tampil di bagian bawah layar (y: 260..480)
+        capturer.setKeyboardFrameForTesting(CGRect(x: 0, y: 260, width: 320, height: 220))
+
+        var capturedFrames: [ScreenFramePayload] = []
+        capturer.onFrameCaptured = { frame in
+            capturedFrames.append(frame)
+        }
+
+        capturer.start()
+        capturer.setPeriodicFps(nil)
+        capturer.captureImmediate(force: true)
+        capturer.flushEncodeQueueForTesting()
+        capturer.stop()
+
+        let frame = try XCTUnwrap(capturedFrames.first)
+        XCTAssertEqual(frame.masked, true)
+
+        let jpegData = try XCTUnwrap(Data(base64Encoded: frame.data))
+        let image = try XCTUnwrap(UIImage(data: jpegData))
+        let cgImage = try XCTUnwrap(image.cgImage)
+        let sampleY = Int(Double(cgImage.height) * 0.8)
+        let sampleX = cgImage.width / 2
+        let pixel = samplePixelRGB(in: cgImage, x: sampleX, y: sampleY)
+        XCTAssertLessThan(pixel.r, 80)
+        XCTAssertLessThan(pixel.g, 80)
+        XCTAssertLessThan(pixel.b, 90)
+    }
+
+    @MainActor
+    func testMaskAllTextMasksSwiftUIHostingViewArea() throws {
+        final class _UIHostingViewContainerStub: UIView {}
+
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        window.backgroundColor = .white
+        let hostingView = _UIHostingViewContainerStub(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        hostingView.backgroundColor = .white
+        window.addSubview(hostingView)
+        window.isHidden = false
+
+        let capturer = ScreenCapturer(quality: .standard, fps: 2.0, maskAllText: true)
+        capturer.windowProvider = { [window] }
+        capturer.isAppActive = { true }
+
+        var capturedFrames: [ScreenFramePayload] = []
+        capturer.onFrameCaptured = { frame in
+            capturedFrames.append(frame)
+        }
+
+        capturer.start()
+        capturer.setPeriodicFps(nil)
+        capturer.captureImmediate(force: true)
+        capturer.flushEncodeQueueForTesting()
+        capturer.stop()
+
+        let frame = try XCTUnwrap(capturedFrames.first)
+        XCTAssertEqual(frame.masked, true)
+
+        let jpegData = try XCTUnwrap(Data(base64Encoded: frame.data))
+        let image = try XCTUnwrap(UIImage(data: jpegData))
+        let cgImage = try XCTUnwrap(image.cgImage)
+        let pixel = samplePixelRGB(in: cgImage, x: cgImage.width / 2, y: cgImage.height / 2)
+        XCTAssertLessThan(pixel.r, 80)
+        XCTAssertLessThan(pixel.g, 80)
+        XCTAssertLessThan(pixel.b, 90)
+    }
 }
 #endif

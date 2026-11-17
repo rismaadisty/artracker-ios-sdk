@@ -39,6 +39,11 @@ public final class ScreenCapturer {
     }
     internal var windowProvider: (() -> [UIWindow])? = nil
     internal var maskCollector: (UIWindow, Bool) throws -> [CGRect] = MaskingRules.collectMaskRects
+    internal var isSensitiveFirstResponderChecker: (UIWindow, Bool) -> Bool = MaskingRules.isSensitiveFirstResponderActive
+    internal func setKeyboardFrameForTesting(_ frame: CGRect?) {
+        self.keyboardFrame = frame
+        self.isKeyboardVisible = (frame != nil && frame!.height > 0)
+    }
     internal func flushEncodeQueueForTesting() {
         encodeQueue.sync {}
     }
@@ -254,7 +259,7 @@ public final class ScreenCapturer {
 
         // Check if active first responder is sensitive
         let isFirstResponderSensitive = windows.contains { window in
-            MaskingRules.isSensitiveFirstResponderActive(in: window, maskAllText: self.maskAllText)
+            self.isSensitiveFirstResponderChecker(window, self.maskAllText)
         }
 
         let capturedImage = renderer.image { ctx in
@@ -272,12 +277,25 @@ public final class ScreenCapturer {
             }
 
             // 2. Keyboard masking: if active first responder is sensitive, mask keyboard area
-            if isFirstResponderSensitive, let kFrame = self.keyboardFrame, self.isKeyboardVisible {
-                let convertedKFrame = primaryWindow.convert(kFrame, from: nil)
-                let intersection = convertedKFrame.intersection(canvasBounds)
-                if !intersection.isNull && !intersection.isEmpty {
-                    hasMaskedContent = true
-                    drawMaskBlock(in: intersection, context: ctx.cgContext)
+            if isFirstResponderSensitive {
+                if let kFrame = self.keyboardFrame, self.isKeyboardVisible {
+                    let convertedKFrame = primaryWindow.convert(kFrame, from: nil)
+                    let intersection = convertedKFrame.intersection(canvasBounds)
+                    if !intersection.isNull && !intersection.isEmpty {
+                        hasMaskedContent = true
+                        drawMaskBlock(in: intersection, context: ctx.cgContext)
+                    }
+                }
+                for window in windows {
+                    let clsName = String(describing: type(of: window))
+                    if clsName.contains("KeyboardWindow") || clsName.contains("TextEffectsWindow") {
+                        let winRect = primaryWindow.convert(window.bounds, from: window)
+                        let intersection = winRect.intersection(canvasBounds)
+                        if !intersection.isNull && !intersection.isEmpty {
+                            hasMaskedContent = true
+                            drawMaskBlock(in: intersection, context: ctx.cgContext)
+                        }
+                    }
                 }
             }
 
