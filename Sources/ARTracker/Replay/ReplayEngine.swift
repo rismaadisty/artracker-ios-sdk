@@ -396,6 +396,10 @@ public final class ReplayEngine: @unchecked Sendable {
 
     @MainActor
     private func handleDidEnterBackground() {
+        lock.withLock {
+            pendingDebounceWorkItem?.cancel()
+            pendingDebounceWorkItem = nil
+        }
         delayedStartWorkItem?.cancel()
         delayedStartWorkItem = nil
         transitionWorkItem?.cancel()
@@ -408,9 +412,11 @@ public final class ReplayEngine: @unchecked Sendable {
 
     @MainActor
     private func handleDidBecomeActive() {
+        SessionManager.shared.onForeground()
         let nowMs = clock()
         governor?.onUserInput(nowMs: nowMs)
         applyGovernorState(now: nowMs)
+        screenCapturer?.captureImmediate(triggerReason: "app.foreground", force: true)
         chunkManager?.resumeFlushTimer()
         scheduleNextTransition()
     }

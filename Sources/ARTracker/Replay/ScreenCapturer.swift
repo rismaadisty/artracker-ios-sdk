@@ -190,6 +190,7 @@ public final class ScreenCapturer {
     private func resumeTimer() {
         guard isRunning, isPaused else { return }
         isPaused = false
+        lastFrameHash = nil
         restartTimer()
         performCapture()
     }

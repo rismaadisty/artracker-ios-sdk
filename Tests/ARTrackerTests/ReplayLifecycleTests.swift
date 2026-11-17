@@ -458,5 +458,57 @@ final class ReplayLifecycleTests: XCTestCase {
         let appReq = URLRequest(url: appUrl)
         XCTAssertTrue(ARTrackerURLProtocol.canInit(with: appReq))
     }
+
+    @MainActor
+    func testForegroundReturnAfterIdleTimeoutRotatesSessionAndForcesInitialFrame() {
+        let clockBox = ClockBox()
+        let diskQueue = ReplayDiskQueue(customDirectory: tempDir)
+        let uploader = ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "test")
+        let window = createTestWindow()
+
+        SessionManager.shared.touch()
+        let initialSessionId = SessionManager.shared.sessionId
+
+        ReplayEngine.shared.startForTesting(
+            uploader: uploader,
+            diskQueue: diskQueue,
+            fps: 2.0,
+            idleAfterMs: 1_000,
+            dormantAfterMs: 2_000,
+            clock: { clockBox.nowMs },
+            windowProvider: { [window] },
+            isAppActive: { true }
+        )
+
+        ReplayEngine.shared.flushCapturerForTesting()
+        let countBeforeBackground = ReplayEngine.shared.capturedFrameCountForTesting
+        XCTAssertGreaterThanOrEqual(countBeforeBackground, 1)
+
+        // Masuk ke background
+        ReplayEngine.shared.handleBackgroundForTesting()
+
+        // Simulasikan waktu idle > 30 menit tanpa mengubah isi window (layar tetap statis di 1 screen)
+        SessionManager.shared._testSetExpired()
+        XCTAssertTrue(SessionManager.shared.isExpired)
+        clockBox.nowMs += 1_900_000
+
+        // Kembali ke foreground (didBecomeActiveNotification)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        let exp = expectation(description: "Foreground wake capture")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+        ReplayEngine.shared.flushCapturerForTesting()
+
+        // Sesi harus sudah berotasi ke ID baru
+        let newSessionId = SessionManager.shared.sessionId
+        XCTAssertNotEqual(newSessionId, initialSessionId)
+        XCTAssertFalse(SessionManager.shared.isExpired)
+
+        // Walaupun layar statis (identik), sesi baru WAJIB menangkap minimal 1 frame baru (tidak di-drop lastFrameHash)
+        XCTAssertGreaterThan(ReplayEngine.shared.capturedFrameCountForTesting, countBeforeBackground)
+    }
 }
 #endif

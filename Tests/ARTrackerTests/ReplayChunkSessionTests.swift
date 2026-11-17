@@ -252,6 +252,51 @@ final class ReplayChunkSessionTests: XCTestCase {
         XCTAssertEqual(spy.requestedChunks.last?.startTime, expectedStartTime)
     }
 
+    func testLeftoverChunkFlushedAfterLongIdleUsesLastEventUptimeNotWakeUptime() throws {
+        final class FakeState: @unchecked Sendable {
+            var sessionId = "ses_idle_1"
+            var uptime: TimeInterval = 1_000.0
+            var date: Date = Date(timeIntervalSince1970: 1_700_000_000)
+        }
+        let state = FakeState()
+        let spy = SpyReplayUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { state.sessionId },
+            uptimeProvider: { state.uptime },
+            dateProvider: { state.date }
+        )
+
+        // Frame 1 masuk pada t = 1005s (5 detik setelah sesi mulai), belum ter-flush
+        state.uptime = 1_005.0
+        manager.appendScreenFrame(makeDummyFrame(ts: 1_005_000))
+
+        // Aplikasi diam (idle/dormant) selama 90 menit (5400 detik) -> t = 6405s
+        // Lalu user menyentuh layar sehingga sesi berotasi ke ses_idle_2
+        state.uptime = 6_405.0
+        state.date = Date(timeIntervalSince1970: 1_700_005_405)
+        state.sessionId = "ses_idle_2"
+
+        manager.appendScreenFrame(makeDummyFrame(ts: 6_405_000))
+        state.uptime = 6_415.0
+        flushAndWait(manager)
+
+        XCTAssertEqual(spy.ackedChunks.count, 2)
+        // Sesi pertama harus melaporkan durasi sampai event terakhirnya (~5.000 ms), BUKAN 5.405.000 ms (90 menit)!
+        XCTAssertEqual(spy.ackedChunks[0].sessionId, "ses_idle_1")
+        XCTAssertEqual(spy.ackedChunks[0].seq, 0)
+        XCTAssertEqual(spy.ackedChunks[0].durationMs, 5_000, accuracy: 1.0)
+
+        // Sesi kedua mulai dari seq 0 dengan durasi 10.000 ms
+        XCTAssertEqual(spy.ackedChunks[1].sessionId, "ses_idle_2")
+        XCTAssertEqual(spy.ackedChunks[1].seq, 0)
+        XCTAssertEqual(spy.ackedChunks[1].durationMs, 10_000, accuracy: 1.0)
+    }
+
     func testScreenshotDisabledClearsQueueAndIgnoresSubsequentFramesAndTouches() {
         final class Counter: @unchecked Sendable {
             private let lock = NSLock()
