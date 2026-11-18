@@ -6,6 +6,83 @@ import UIKit
 
 final class ReplayTests: XCTestCase {
 
+    final class SpyChunkUploader: ReplayUploading, @unchecked Sendable {
+        private let lock = NSLock()
+        var ackedEventCounts: [Int] = []
+
+        func fetchReplayConfig(completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void) {
+            completion(.success(ReplayRemoteConfig(screenshotEnabled: true, maxFps: 2.0)))
+        }
+
+        func requestChunkUrl(
+            sessionId: String,
+            chunkSeq: Int,
+            sizeBytes: Int,
+            userId: String?,
+            environment: String,
+            startTime: String,
+            format: String = "artracker-mobile-v1",
+            completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+        ) {
+            completion(.success((URL(string: "https://example.com/upload")!, "key_\(chunkSeq)")))
+        }
+
+        func uploadGzipData(
+            uploadUrl: URL,
+            gzipData: Data,
+            completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        ) {
+            completion(.success(()))
+        }
+
+        func acknowledgeChunk(
+            sessionId: String,
+            chunkSeq: Int,
+            sizeBytes: Int,
+            durationMs: Double,
+            eventCount: Int,
+            hasError: Bool,
+            hasRageClick: Bool,
+            completion: @escaping @Sendable (Result<Void, Error>) -> Void
+        ) {
+            lock.withLock {
+                ackedEventCounts.append(eventCount)
+            }
+            completion(.success(()))
+        }
+    }
+
+    func testChunkClosesWhenApproachingTwoMegabytes() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let spy = SpyChunkUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_size_cap" }
+        )
+
+        // Buat payload sekitar 900 KB per frame (base64)
+        let largeData = String(repeating: "A", count: 900_000)
+        let frame1 = ScreenFramePayload(ts: 1, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: largeData)
+        let frame2 = ScreenFramePayload(ts: 2, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: largeData)
+        let frame3 = ScreenFramePayload(ts: 3, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: largeData)
+
+        manager.appendScreenFrame(frame1) // ~900 KB
+        manager.appendScreenFrame(frame2) // ~1.8 MB (masih <= 2 MB)
+        manager.appendScreenFrame(frame3) // akan menjadi ~2.7 MB -> harus memicu flush frame1+frame2 lebih dulu!
+
+        let exp = expectation(description: "flush")
+        manager.flush { exp.fulfill() }
+        wait(for: [exp], timeout: 5.0)
+
+        XCTAssertEqual(spy.ackedEventCounts, [2, 1])
+    }
+
     func testScreenChunkPayloadMatchesOfficialContract() throws {
         let frame = ScreenFramePayload(
             ts: 1731143820120,
@@ -163,7 +240,7 @@ final class ReplayTests: XCTestCase {
         XCTAssertTrue(queue.shouldHalveFps())
     }
 
-    func testMaskingRulesExtendedForSensitiveContent() {
+    func testMaskingRulesExtendedForSensitiveContent() throws {
         XCTAssertEqual(MaskingRules.maskText("secret123"), "*********")
         XCTAssertEqual(MaskingRules.maskText(""), "")
         XCTAssertEqual(MaskingRules.maskText(nil), "")
@@ -180,11 +257,12 @@ final class ReplayTests: XCTestCase {
         XCTAssertTrue(MaskingRules.shouldMask(view: marker, maskAllText: false))
 
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 300, height: 600))
+        window.isHidden = false
         let child = UIView(frame: CGRect(x: 10, y: 10, width: 100, height: 50))
         child.artrackerMasked = true
         window.addSubview(child)
 
-        let rects = MaskingRules.collectMaskRects(in: window, maskAllText: false)
+        let rects = try MaskingRules.collectMaskRects(in: window, maskAllText: false)
         XCTAssertEqual(rects.count, 1)
         XCTAssertEqual(rects.first, CGRect(x: 10, y: 10, width: 100, height: 50))
         #endif
@@ -212,5 +290,132 @@ final class ReplayTests: XCTestCase {
         let decodedUp = try decoder.decode(ScreenTouchPoint.self, from: upData)
         XCTAssertEqual(decodedUp, up)
         XCTAssertEqual(decodedUp.kind, "up")
+    }
+
+    func testProducedGzipChunkDecompressesAndMatchesContractWithFramesAndTouches() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        final class CapturingUploader: ReplayUploading, @unchecked Sendable {
+            var uploadedGzipData: Data?
+            var ackedEventCount: Int?
+            var requestedFormat: String?
+
+            func fetchReplayConfig(completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void) {
+                completion(.success(ReplayRemoteConfig(screenshotEnabled: true, maxFps: 2.0)))
+            }
+            func requestChunkUrl(
+                sessionId: String, chunkSeq: Int, sizeBytes: Int, userId: String?,
+                environment: String, startTime: String, format: String,
+                completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+            ) {
+                requestedFormat = format
+                completion(.success((URL(string: "https://example.com/upload")!, "key_\(chunkSeq)")))
+            }
+            func uploadGzipData(uploadUrl: URL, gzipData: Data, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+                uploadedGzipData = gzipData
+                completion(.success(()))
+            }
+            func acknowledgeChunk(
+                sessionId: String, chunkSeq: Int, sizeBytes: Int, durationMs: Double,
+                eventCount: Int, hasError: Bool, hasRageClick: Bool,
+                completion: @escaping @Sendable (Result<Void, Error>) -> Void
+            ) {
+                ackedEventCount = eventCount
+                completion(.success(()))
+            }
+        }
+
+        let spy = CapturingUploader()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "production",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_contract" }
+        )
+
+        manager.appendScreenFrame(ScreenFramePayload(ts: 100, screen: "Home", w: 720, h: 1280, vw: 360, vh: 640, data: "dGVzdA==", masked: true))
+        manager.appendScreenFrame(ScreenFramePayload(ts: 200, screen: "Detail", w: 720, h: 1280, vw: 360, vh: 640, data: "dGVzdDI=", masked: false))
+        manager.appendScreenTouch(ScreenTouchPoint(ts: 150, x: 120, y: 240, kind: "down"))
+        manager.appendScreenTouch(ScreenTouchPoint(ts: 180, x: 120, y: 240, kind: "up"))
+
+        let exp = expectation(description: "flush")
+        manager.flush { exp.fulfill() }
+        wait(for: [exp], timeout: 5.0)
+
+        XCTAssertEqual(spy.requestedFormat, "artracker-screen-v1")
+        XCTAssertEqual(spy.ackedEventCount, 4) // 2 frames + 2 touches
+
+        let gzipData = try XCTUnwrap(spy.uploadedGzipData)
+        XCTAssertTrue(Gzip.isGzip(data: gzipData))
+        let rawJson = try Gzip.decompress(data: gzipData)
+        let decoded = try JSONDecoder().decode(ScreenChunkPayload.self, from: rawJson)
+        XCTAssertEqual(decoded.format, "artracker-screen-v1")
+        XCTAssertEqual(decoded.platform, "ios")
+        XCTAssertEqual(decoded.seq, 0)
+        XCTAssertEqual(decoded.frames.count, 2)
+        XCTAssertEqual(decoded.touches.count, 2)
+    }
+
+    func testOfflineQueueDropsOldestChunksFirstWhenExceedingCap() throws {
+        XCTAssertEqual(ReplayDiskQueue.defaultMaxDiskBytes, 50 * 1024 * 1024)
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Gunakan cap 2.000 bytes untuk menguji mekanisme pruning oldest-first secara cepat
+        let queue = ReplayDiskQueue(customDirectory: tempDir, maxDiskBytes: 2_000)
+        let payloadData = Data(repeating: 0x41, count: 500)
+
+        let itemOldest = ReplayQueueItem(
+            id: "oldest",
+            seq: 0,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 1000,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-17T00:00:00Z",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            data: payloadData
+        )
+        let itemMiddle = ReplayQueueItem(
+            id: "middle",
+            seq: 1,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 2000,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-17T00:00:00Z",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+            data: payloadData
+        )
+        let itemNewest = ReplayQueueItem(
+            id: "newest",
+            seq: 2,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 3000,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-17T00:00:00Z",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_020),
+            data: payloadData
+        )
+
+        queue.enqueue(itemOldest)
+        queue.enqueue(itemMiddle)
+        queue.enqueue(itemNewest) // Total > 1.500 bytes -> itemOldest harus terhapus otomatis!
+
+        let firstRemaining = try XCTUnwrap(queue.peekNext())
+        XCTAssertEqual(firstRemaining.id, "middle")
+        queue.remove(id: "middle")
+
+        let secondRemaining = try XCTUnwrap(queue.peekNext())
+        XCTAssertEqual(secondRemaining.id, "newest")
     }
 }

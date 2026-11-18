@@ -12,6 +12,7 @@ public struct ReplayQueueItem: Codable, Sendable {
     public let startTime: String
     public let createdAt: Date
     public let data: Data
+    public let sessionId: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -23,7 +24,8 @@ public struct ReplayQueueItem: Codable, Sendable {
         hasRage: Bool,
         startTime: String,
         createdAt: Date = Date(),
-        data: Data
+        data: Data,
+        sessionId: String? = nil
     ) {
         self.id = id
         self.seq = seq
@@ -35,22 +37,26 @@ public struct ReplayQueueItem: Codable, Sendable {
         self.startTime = startTime
         self.createdAt = createdAt
         self.data = data
+        self.sessionId = sessionId
     }
 }
 
 /// Persistent offline queue stored in `Library/Caches/ARTracker/replay/` with 50 MB storage cap
 /// and rolling 60s byte budget governor.
 public final class ReplayDiskQueue: @unchecked Sendable {
+    public static let defaultMaxDiskBytes: Int64 = 50 * 1024 * 1024 // 50 MB
+
     private let lock = UnfairLock()
     private let directoryURL: URL
-    private let maxDiskBytes: Int64 = 50 * 1024 * 1024 // 50 MB
+    private let maxDiskBytes: Int64
     private let maxBytesPerMinute: Int64 = 5 * 1024 * 1024 // 5 MB / min
 
     // Rolling byte budget tracking: [(timestamp, byteCount)]
     private var rollingByteHistory: [(uptime: TimeInterval, bytes: Int)] = []
     private var consecutiveOverruns: Int = 0
 
-    public init(customDirectory: URL? = nil) {
+    public init(customDirectory: URL? = nil, maxDiskBytes: Int64 = ReplayDiskQueue.defaultMaxDiskBytes) {
+        self.maxDiskBytes = maxDiskBytes
         if let customDir = customDirectory {
             self.directoryURL = customDir
         } else {

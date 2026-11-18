@@ -6,11 +6,14 @@ import UIKit
 /// Manages buffering of ScreenFramePayload and ScreenTouchPoint, 10s rotation,
 /// Gzip compression, persistent disk queue in Caches, and uploading to backend / R2.
 public final class ReplayChunkManager: @unchecked Sendable {
+    public static let maxChunkBytes: Int = 2 * 1024 * 1024
+
     private let lock = UnfairLock()
-    private let uploader: ReplayUploader
+    private let uploader: any ReplayUploading
     private let environment: String
     private let wifiOnly: Bool
     private let diskQueue: ReplayDiskQueue
+    private let sessionIdProvider: @Sendable () -> String
     private let workerQueue = DispatchQueue(label: "com.artracker.replay.worker", qos: .utility)
 
     // Shared monotonic sequence counter
@@ -19,28 +22,45 @@ public final class ReplayChunkManager: @unchecked Sendable {
     // Screenshot buffers
     private var screenFrameBuffer: [ScreenFramePayload] = []
     private var screenTouchBuffer: [ScreenTouchPoint] = []
+    private var currentBufferBytes: Int = 0
+    private var activeSessionId: String? = nil
+    private var currentChunkSessionId: String? = nil
 
-    private var chunkStartTime: Date = Date()
-    private var chunkStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private let uptimeProvider: @Sendable () -> TimeInterval
+    private let dateProvider: @Sendable () -> Date
+    private var sessionStartTime: Date
+    private var sessionStartUptime: TimeInterval
+    private var lastEventUptime: TimeInterval? = nil
     private var hasError: Bool = false
     private var hasRageClick: Bool = false
     private var flushTimer: DispatchSourceTimer?
+    private var oneShotFlushTimer: DispatchSourceTimer?
     private var isFlushing: Bool = false
+    private var isScreenshotDisabled: Bool = false
+    private var retryNotBeforeUptime: TimeInterval = 0
 
     // Callbacks
     public var onScreenshotDisabled: (@Sendable () -> Void)?
     public var onBudgetGovernorAlert: (@Sendable (_ shouldHalveFps: Bool, _ shouldStepDownQuality: Bool) -> Void)?
 
     public init(
-        uploader: ReplayUploader,
+        uploader: any ReplayUploading,
         environment: String,
         wifiOnly: Bool = false,
-        diskQueue: ReplayDiskQueue = ReplayDiskQueue()
+        diskQueue: ReplayDiskQueue = ReplayDiskQueue(),
+        sessionIdProvider: @escaping @Sendable () -> String = { SessionManager.shared.peekSessionId() ?? SessionManager.shared.sessionId },
+        uptimeProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        dateProvider: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.uploader = uploader
         self.environment = environment
         self.wifiOnly = wifiOnly
         self.diskQueue = diskQueue
+        self.sessionIdProvider = sessionIdProvider
+        self.uptimeProvider = uptimeProvider
+        self.dateProvider = dateProvider
+        self.sessionStartUptime = uptimeProvider()
+        self.sessionStartTime = dateProvider()
         startFlushTimer()
         processPendingUploads(completion: nil)
     }
@@ -59,10 +79,43 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     // MARK: - Screenshot Appending
 
+    private func prepareSessionLocked(_ currentSession: String) {
+        if let chunkSession = currentChunkSessionId, chunkSession != currentSession {
+            if !screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty {
+                triggerFlushLocked(overrideEndUptime: lastEventUptime)
+            }
+        }
+        if activeSessionId != currentSession {
+            let isInitialBinding = (activeSessionId == nil && lastEventUptime == nil)
+            activeSessionId = currentSession
+            currentChunkSeq = 0
+            if !isInitialBinding {
+                sessionStartUptime = uptimeProvider()
+                sessionStartTime = dateProvider()
+            }
+            lastEventUptime = nil
+        }
+        if currentChunkSessionId == nil {
+            currentChunkSessionId = currentSession
+        }
+    }
+
     public func appendScreenFrame(_ frame: ScreenFramePayload) {
         lock.withLock {
+            guard !isScreenshotDisabled else { return }
+            let currentSession = sessionIdProvider()
+            prepareSessionLocked(currentSession)
+            lastEventUptime = uptimeProvider()
+
+            let frameBytes = frame.data.utf8.count
+            if !screenFrameBuffer.isEmpty && (currentBufferBytes + frameBytes > Self.maxChunkBytes) {
+                triggerFlushLocked()
+            }
+
             screenFrameBuffer.append(frame)
-            if screenFrameBuffer.count >= 20 {
+            currentBufferBytes += frameBytes
+
+            if screenFrameBuffer.count >= 20 || currentBufferBytes >= Self.maxChunkBytes {
                 triggerFlushLocked()
             }
         }
@@ -70,6 +123,10 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     public func appendScreenTouch(_ touch: ScreenTouchPoint) {
         lock.withLock {
+            guard !isScreenshotDisabled else { return }
+            let currentSession = sessionIdProvider()
+            prepareSessionLocked(currentSession)
+            lastEventUptime = uptimeProvider()
             screenTouchBuffer.append(touch)
             if screenFrameBuffer.count >= 20 || screenTouchBuffer.count >= 200 {
                 triggerFlushLocked()
@@ -90,6 +147,45 @@ public final class ReplayChunkManager: @unchecked Sendable {
         }
     }
 
+    public func pauseFlushTimer() {
+        workerQueue.async { [weak self] in
+            self?.flushTimer?.cancel()
+            self?.flushTimer = nil
+            self?.oneShotFlushTimer?.cancel()
+            self?.oneShotFlushTimer = nil
+        }
+    }
+
+    public func resumeFlushTimer() {
+        workerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.oneShotFlushTimer?.cancel()
+            self.oneShotFlushTimer = nil
+            if self.flushTimer == nil {
+                self.startFlushTimer()
+            }
+        }
+    }
+
+    public func scheduleOneShotFlush(after seconds: TimeInterval) {
+        workerQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.oneShotFlushTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: self.workerQueue)
+            timer.schedule(deadline: .now() + seconds)
+            timer.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                self.lock.withLock {
+                    self.triggerFlushLocked()
+                }
+                self.processPendingUploads(completion: nil)
+                self.oneShotFlushTimer = nil
+            }
+            timer.resume()
+            self.oneShotFlushTimer = timer
+        }
+    }
+
     private func startFlushTimer() {
         let timer = DispatchSource.makeTimerSource(queue: workerQueue)
         timer.schedule(deadline: .now() + 10.0, repeating: 10.0)
@@ -103,12 +199,23 @@ public final class ReplayChunkManager: @unchecked Sendable {
         self.flushTimer = timer
     }
 
-    private func triggerFlushLocked() {
+    private func triggerFlushLocked(overrideEndUptime: TimeInterval? = nil) {
         guard !screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty else { return }
 
-        let nowUptime = ProcessInfo.processInfo.systemUptime
-        let durationMs = max(100.0, (nowUptime - chunkStartUptime) * 1000.0)
-        let sTime = ISO8601DateFormatter().string(from: chunkStartTime)
+        let chunkSession = currentChunkSessionId ?? sessionIdProvider()
+        currentChunkSessionId = nil
+
+        let nowUptime = uptimeProvider()
+        let effectiveEndUptime: TimeInterval
+        if let override = overrideEndUptime {
+            effectiveEndUptime = override
+        } else if let last = lastEventUptime {
+            effectiveEndUptime = min(nowUptime, last + SessionManager.shared.idleTimeout)
+        } else {
+            effectiveEndUptime = nowUptime
+        }
+        let durationMs = max(100.0, (effectiveEndUptime - sessionStartUptime) * 1000.0)
+        let sTime = ISO8601DateFormatter().string(from: sessionStartTime)
         let chunkHasErr = hasError
         let chunkHasRage = hasRageClick
 
@@ -116,9 +223,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
         let touchesToUpload = screenTouchBuffer
         screenFrameBuffer.removeAll(keepingCapacity: true)
         screenTouchBuffer.removeAll(keepingCapacity: true)
+        currentBufferBytes = 0
 
-        chunkStartTime = Date()
-        chunkStartUptime = nowUptime
         hasError = false
         hasRageClick = false
 
@@ -144,7 +250,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 hasError: chunkHasErr,
                 hasRage: chunkHasRage,
                 startTime: sTime,
-                data: gzipped
+                data: gzipped,
+                sessionId: chunkSession
             )
             diskQueue.enqueue(item)
 
@@ -171,6 +278,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
             }
 
             let item = self.lock.withLock { () -> ReplayQueueItem? in
+                guard !self.isScreenshotDisabled else { return nil }
+                guard self.uptimeProvider() >= self.retryNotBeforeUptime else { return nil }
                 guard !self.isFlushing else { return nil }
                 guard let nextItem = self.diskQueue.peekNext() else { return nil }
                 self.isFlushing = true
@@ -182,7 +291,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 return
             }
 
-            let sessionId = SessionManager.shared.sessionId
+            let sessionId = queueItem.sessionId ?? self.sessionIdProvider()
             let userId = SessionManager.shared.userId
 
             #if canImport(UIKit)
@@ -243,8 +352,21 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
                 case .failure(let error):
                     if case ReplayUploadError.screenshotDisabled = error {
+                        self.lock.withLock {
+                            self.isScreenshotDisabled = true
+                            self.screenFrameBuffer.removeAll(keepingCapacity: false)
+                            self.screenTouchBuffer.removeAll(keepingCapacity: false)
+                            self.currentBufferBytes = 0
+                        }
+                        self.pauseFlushTimer()
                         self.diskQueue.clearScreenshotChunks()
                         self.onScreenshotDisabled?()
+                    } else if case ReplayUploadError.httpError(_, _, let retryAfter) = error {
+                        if let retry = retryAfter, retry > 0 {
+                            self.lock.withLock {
+                                self.retryNotBeforeUptime = self.uptimeProvider() + retry
+                            }
+                        }
                     }
 
                     self.lock.withLock { self.isFlushing = false }

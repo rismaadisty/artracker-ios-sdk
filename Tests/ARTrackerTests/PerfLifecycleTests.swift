@@ -9,10 +9,13 @@ final class PerfLifecycleTests: XCTestCase {
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         ARTracker.shared._testInstallPerfMonitor(nil, queue: nil)
+        SessionManager.shared.recordUserActivity()
     }
 
     override func tearDownWithError() throws {
+        SessionManager.shared.listener = nil
         ARTracker.shared._testInstallPerfMonitor(nil, queue: nil)
+        SessionManager.shared.recordUserActivity()
         if let tempDir = tempDir {
             try? FileManager.default.removeItem(at: tempDir)
         }
@@ -26,7 +29,7 @@ final class PerfLifecycleTests: XCTestCase {
         XCTAssertNil(ARTracker.shared.perfMonitorForTesting)
     }
 
-    func testBackgroundEnqueuesPerfItemBeforeSessionEnd() throws {
+    func testBackgroundFlushesPerfItemWithoutEndingSession() throws {
         let dbURL = tempDir.appendingPathComponent("perf-bg.sqlite")
         let queue = DiskQueue(databaseURL: dbURL)
         let workQueue = DispatchQueue(label: "test.lifecycle.bg")
@@ -65,15 +68,53 @@ final class PerfLifecycleTests: XCTestCase {
 
         let records = queue.dequeue(limit: 50)
         let perfRecord = try XCTUnwrap(records.first(where: { $0.item.type == .perf }))
-        let sessionEndRecord = try XCTUnwrap(records.first(where: { $0.item.type == .session && $0.item.name == "session.end" }))
+        XCTAssertNil(records.first(where: { $0.item.type == .session }))
 
         if case .array(let arr) = perfRecord.item.attributes["samples"] {
             XCTAssertEqual(arr.count, 4)
         } else {
             XCTFail("Expected 4 samples in flushed perf item")
         }
+    }
 
-        XCTAssertLessThan(perfRecord.id, sessionEndRecord.id)
+    func testBackgroundDoesNotEndSession() throws {
+        let dbURL = tempDir.appendingPathComponent("session-bg.sqlite")
+        let queue = DiskQueue(databaseURL: dbURL)
+        ARTracker.shared._testInstallPerfMonitor(nil, queue: queue)
+        SessionManager.shared.listener = ARTracker.shared
+        queue.purge()
+
+        let initialSession = SessionManager.shared.sessionId
+
+        ARTracker.shared.handleAppDidEnterBackground()
+
+        let records = queue.dequeue(limit: 50)
+        XCTAssertNil(records.first(where: { $0.item.type == .session && $0.item.name == "session_end" }))
+
+        ARTracker.shared.handleAppDidBecomeActive()
+        XCTAssertEqual(SessionManager.shared.sessionId, initialSession)
+    }
+
+    func testRotationEmitsSessionEndThenStart() throws {
+        let dbURL = tempDir.appendingPathComponent("session-rot.sqlite")
+        let queue = DiskQueue(databaseURL: dbURL)
+        ARTracker.shared._testInstallPerfMonitor(nil, queue: queue)
+        SessionManager.shared.listener = ARTracker.shared
+
+        let oldSessionId = SessionManager.shared.sessionId
+        let newSessionId = SessionManager.shared.rotateSession()
+        XCTAssertNotEqual(oldSessionId, newSessionId)
+
+        let records = queue.dequeue(limit: 50)
+        let sessionRecords = records.filter { $0.item.type == .session }
+        XCTAssertGreaterThanOrEqual(sessionRecords.count, 2)
+
+        let endRecord = try XCTUnwrap(sessionRecords.first(where: { $0.item.name == "session_end" }))
+        let startRecord = try XCTUnwrap(sessionRecords.first(where: { $0.item.name == "session_start" }))
+
+        XCTAssertEqual(endRecord.item.sessionId, oldSessionId)
+        XCTAssertEqual(startRecord.item.sessionId, newSessionId)
+        XCTAssertNotNil(endRecord.item.attributes["duration_ms"])
     }
 
     func testBackgroundStopsTimerSoNoNewSamplesArrive() {

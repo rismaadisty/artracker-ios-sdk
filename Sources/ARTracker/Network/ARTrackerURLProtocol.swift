@@ -86,6 +86,11 @@ public final class ARTrackerURLProtocol: URLProtocol, @unchecked Sendable {
                     ]
                 )
                 ARTracker.shared.enqueueItem(item)
+                #if canImport(UIKit)
+                DispatchQueue.main.async {
+                    ReplayEngine.shared.trigger(.network)
+                }
+                #endif
             }
 
             if let error = error {

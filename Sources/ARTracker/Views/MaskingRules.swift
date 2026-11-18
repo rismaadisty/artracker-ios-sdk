@@ -70,7 +70,7 @@ public struct MaskingRules: Sendable {
     }
 
     /// Recursively collects all masked rectangles within the window in window coordinate space.
-    public static func collectMaskRects(in window: UIWindow, maskAllText: Bool) -> [CGRect] {
+    public static func collectMaskRects(in window: UIWindow, maskAllText: Bool) throws -> [CGRect] {
         var rects: [CGRect] = []
 
         func traverse(_ view: UIView) {

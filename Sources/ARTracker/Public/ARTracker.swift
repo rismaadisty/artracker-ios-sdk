@@ -20,6 +20,7 @@ public final class ARTracker: @unchecked Sendable {
     private var currentDiskQueue: DiskQueue? { lock.withLock { _diskQueue } }
     private var currentUploader: Uploader? { lock.withLock { _uploader } }
     private var currentPerfMonitor: PerfMonitor? { lock.withLock { _perfMonitor } }
+    private var hasEmittedInitialSessionStart: Bool = false
 
     public static var isInstalled: Bool {
         shared.lock.withLock { shared._isInstalled }
@@ -74,6 +75,7 @@ public final class ARTracker: @unchecked Sendable {
         self._crashEngine = crashEngine
         self.sessionStartUptime = ProcessInfo.processInfo.systemUptime
 
+        Self.applySessionConfig(config, to: SessionManager.shared)
         _ = SessionManager.shared.sessionId
 
         #if canImport(UIKit)
@@ -159,10 +161,13 @@ public final class ARTracker: @unchecked Sendable {
             )
         }
 
-        // 7. View Tree Swizzle
+        // 7. View Tree Swizzle & Always-on Touch Tracking
         #if canImport(UIKit)
-        if config.enableViewCapture {
-            DispatchQueue.main.async {
+        DispatchQueue.main.async {
+            TouchTracker.shared.startActivityTracking {
+                SessionManager.shared.recordUserActivity()
+            }
+            if config.enableViewCapture {
                 UISwizzle.shared.enable()
             }
         }
@@ -189,7 +194,9 @@ public final class ARTracker: @unchecked Sendable {
                 maskAllText: config.maskAllText,
                 wifiOnly: config.wifiOnly,
                 quality: config.replayQuality,
-                fps: config.replayFramesPerSecond
+                fps: config.replayFramesPerSecond,
+                idleAfterMs: Int64(config.replayIdleAfter * 1000.0),
+                dormantAfterMs: Int64(config.replayDormantAfter * 1000.0)
             )
         }
 
@@ -199,18 +206,9 @@ public final class ARTracker: @unchecked Sendable {
         // 9. API Key Early Validation (GAP-06)
         validateAPIKey(endpoint: endpoint, appKey: appKey, uploader: uploader)
 
-        // 10. Automatic Session Lifecycle Event (GAP-07)
-        let sessionItem = Item(
-            type: .session,
-            name: "session.start",
-            sessionId: SessionManager.shared.sessionId,
-            userId: SessionManager.shared.userId,
-            attributes: [
-                "launch_type": .string("cold"),
-                "session_id": .string(SessionManager.shared.sessionId)
-            ]
-        )
-        _ = queue.enqueue(sessionItem)
+        // 10. Automatic Session Lifecycle Event (aligned with Android)
+        SessionManager.shared.listener = self
+        sessionDidStart(id: SessionManager.shared.sessionId)
 
         Log.info("ARTracker Phase B completed. SDK active.")
     }
@@ -479,21 +477,10 @@ public final class ARTracker: @unchecked Sendable {
     #if canImport(UIKit)
     @MainActor
     public func recordScreenView(name: String, view: UIView?) {
-        var attrs: [String: JSONValue] = [
+        let attrs: [String: JSONValue] = [
             "screen": .string(name),
             "presentation": .string("push")
         ]
-
-        if let v = view, let config = _config, config.enableViewCapture {
-            if ViewSnapshotter.shared.shouldCapture(screen: name) {
-                let (tree, maskedCount) = ViewSnapshotter.shared.capture(view: v, maskAllText: config.maskAllText)
-                attrs["masked_count"] = .number(Double(maskedCount))
-                if let treeData = try? JSONEncoder().encode(tree),
-                   let jsonVal = try? JSONDecoder().decode(JSONValue.self, from: treeData) {
-                    attrs["view_tree"] = jsonVal
-                }
-            }
-        }
 
         if let config = _config, config.enableSessionReplay {
             ReplayEngine.shared.captureFullSnapshot(triggerReason: "screen.view", screenName: name)
@@ -513,6 +500,23 @@ public final class ARTracker: @unchecked Sendable {
         enqueueItem(item)
     }
     #endif
+
+    /// Manually triggers an immediate screenshot capture in session replay mode.
+    /// - Parameter reason: Descriptive context for the capture (debug-logged only).
+    public static func captureReplayFrame(reason: String = "manual") {
+        Log.debug("ARTracker: Manual captureReplayFrame requested with reason: \(reason)")
+        #if canImport(UIKit)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                ReplayEngine.shared.trigger(.manual)
+            }
+        } else {
+            Task { @MainActor in
+                ReplayEngine.shared.trigger(.manual)
+            }
+        }
+        #endif
+    }
 
     // MARK: - Performance Monitor & Lifecycle
 
@@ -550,9 +554,12 @@ public final class ARTracker: @unchecked Sendable {
         currentPerfMonitor
     }
 
+    internal static func applySessionConfig(_ config: ARTrackerConfig, to manager: SessionManager) {
+        manager.configure(idleTimeout: config.sessionTimeout)
+    }
+
     @objc internal func handleAppDidBecomeActive() {
-        sessionStartUptime = ProcessInfo.processInfo.systemUptime
-        SessionManager.shared.touch()
+        SessionManager.shared.onForeground()
         TerminationDetector.shared.setInForeground(true)
         currentUploader?.resumeTimer()
         currentPerfMonitor?.start()
@@ -563,18 +570,7 @@ public final class ARTracker: @unchecked Sendable {
         monitor?.stop()
         monitor?.flush()
 
-        let durationMs = (ProcessInfo.processInfo.systemUptime - sessionStartUptime) * 1000.0
-        let sessionEndItem = Item(
-            type: .session,
-            name: "session.end",
-            sessionId: SessionManager.shared.sessionId,
-            userId: SessionManager.shared.userId,
-            attributes: [
-                "duration_ms": .number(durationMs),
-                "session_id": .string(SessionManager.shared.sessionId)
-            ]
-        )
-        enqueueItem(sessionEndItem)
+        SessionManager.shared.persistSession(forced: true)
 
         TerminationDetector.shared.setInForeground(false)
         ReplayEngine.shared.flush()
@@ -599,5 +595,51 @@ public final class ARTracker: @unchecked Sendable {
             enqueueItem(item)
         }
         currentUploader?.flush()
+    }
+
+    internal func _testResetSessionStartFlag() {
+        lock.withLock {
+            hasEmittedInitialSessionStart = false
+        }
+    }
+}
+
+extension ARTracker: SessionLifecycleListener {
+    func sessionDidStart(id: String) {
+        let isFirst = lock.withLock { () -> Bool in
+            let first = !hasEmittedInitialSessionStart
+            hasEmittedInitialSessionStart = true
+            return first
+        }
+
+        var attrs: [String: JSONValue] = [
+            "session_id": .string(id)
+        ]
+        if isFirst {
+            attrs["launch_type"] = .string("cold")
+        }
+
+        let item = Item(
+            type: .session,
+            name: "session_start",
+            sessionId: id,
+            userId: SessionManager.shared.userId,
+            attributes: attrs
+        )
+        enqueueItem(item)
+    }
+
+    func sessionDidEnd(id: String, durationMs: Double) {
+        let item = Item(
+            type: .session,
+            name: "session_end",
+            sessionId: id,
+            userId: SessionManager.shared.userId,
+            attributes: [
+                "duration_ms": .number(durationMs),
+                "session_id": .string(id)
+            ]
+        )
+        enqueueItem(item)
     }
 }

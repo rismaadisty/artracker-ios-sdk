@@ -62,6 +62,54 @@ public struct Gzip {
         return compressed
     }
 
+    /// Decompresses RFC 1952 Gzip or RFC 1950 zlib data.
+    public static func decompress(data: Data) throws -> Data {
+        guard !data.isEmpty else { return Data() }
+
+        var stream = z_stream()
+        let windowBits: Int32 = 15 + 32 // 47 enables automatic zlib/gzip header detection
+
+        let initStatus = inflateInit2_(
+            &stream,
+            windowBits,
+            ZLIB_VERSION,
+            Int32(MemoryLayout<z_stream>.size)
+        )
+
+        guard initStatus == Z_OK else {
+            throw GzipError.initializationFailed(initStatus)
+        }
+        defer { inflateEnd(&stream) }
+
+        var decompressed = Data(capacity: data.count * 2)
+        let bufferSize = 16384
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+
+        return try data.withUnsafeBytes { rawIn in
+            stream.next_in = UnsafeMutablePointer<Bytef>(mutating: rawIn.bindMemory(to: Bytef.self).baseAddress)
+            stream.avail_in = uInt(data.count)
+
+            var status = Z_OK
+            while status != Z_STREAM_END {
+                try buffer.withUnsafeMutableBufferPointer { rawOut in
+                    stream.next_out = rawOut.baseAddress
+                    stream.avail_out = uInt(bufferSize)
+
+                    status = inflate(&stream, Z_NO_FLUSH)
+                    guard status == Z_OK || status == Z_STREAM_END else {
+                        throw GzipError.compressionFailed(status)
+                    }
+                    let bytesProduced = bufferSize - Int(stream.avail_out)
+
+                    if bytesProduced > 0 {
+                        decompressed.append(rawOut.baseAddress!, count: bytesProduced)
+                    }
+                }
+            }
+            return decompressed
+        }
+    }
+
     /// Verifies if data starts with Gzip magic bytes 0x1F, 0x8B
     public static func isGzip(data: Data) -> Bool {
         guard data.count >= 2 else { return false }

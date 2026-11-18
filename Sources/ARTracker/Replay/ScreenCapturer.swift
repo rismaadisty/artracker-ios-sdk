@@ -12,6 +12,7 @@ public final class ScreenCapturer {
     public var onFrameCaptured: ((ScreenFramePayload) -> Void)?
 
     private var timer: DispatchSourceTimer?
+    private var periodicFps: Double?
     private var isRunning: Bool = false
     private var isPaused: Bool = false
 
@@ -29,6 +30,24 @@ public final class ScreenCapturer {
     // Active screen name
     private var currentScreenName: String = "App"
 
+    // Observer tokens for cleanup
+    private var observerTokens: [NSObjectProtocol] = []
+
+    // Testing hooks
+    internal var isAppActive: () -> Bool = {
+        UIApplication.shared.applicationState == .active
+    }
+    internal var windowProvider: (() -> [UIWindow])? = nil
+    internal var maskCollector: (UIWindow, Bool) throws -> [CGRect] = MaskingRules.collectMaskRects
+    internal var isSensitiveFirstResponderChecker: (UIWindow, Bool) -> Bool = MaskingRules.isSensitiveFirstResponderActive
+    internal func setKeyboardFrameForTesting(_ frame: CGRect?) {
+        self.keyboardFrame = frame
+        self.isKeyboardVisible = (frame != nil && frame!.height > 0)
+    }
+    internal func flushEncodeQueueForTesting() {
+        encodeQueue.sync {}
+    }
+
     // Background worker for JPEG compression + base64 encoding
     private let encodeQueue = DispatchQueue(label: "com.artracker.replay.encoder", qos: .userInitiated)
 
@@ -41,6 +60,7 @@ public final class ScreenCapturer {
         let clampedFps = max(0.5, min(fps, 10.0))
         self.targetFps = clampedFps
         self.effectiveFps = clampedFps
+        self.periodicFps = clampedFps
         self.maskAllText = maskAllText
 
         setupNotificationObservers()
@@ -50,11 +70,28 @@ public final class ScreenCapturer {
         self.currentScreenName = name
     }
 
+    public func setPeriodicFps(_ fps: Double?) {
+        self.periodicFps = fps
+        if isRunning && !isPaused {
+            restartTimer()
+        }
+    }
+
     public func updateFpsCap(_ maxFps: Double) {
         let newTarget = min(self.targetFps, maxFps)
         if newTarget != self.targetFps {
             self.targetFps = max(0.5, min(newTarget, 10.0))
             self.effectiveFps = min(self.effectiveFps, self.targetFps)
+            if isRunning && !isPaused {
+                restartTimer()
+            }
+        }
+    }
+
+    public func halveEffectiveFps() {
+        let newFps = max(0.5, effectiveFps / 2.0)
+        if newFps != effectiveFps {
+            effectiveFps = newFps
             if isRunning && !isPaused {
                 restartTimer()
             }
@@ -73,17 +110,24 @@ public final class ScreenCapturer {
         isPaused = false
         timer?.cancel()
         timer = nil
+        for token in observerTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        observerTokens.removeAll()
     }
 
-    public func captureImmediate(triggerReason: String? = nil) {
+    public func captureImmediate(triggerReason: String? = nil, force: Bool = false) {
         guard isRunning else { return }
+        if force {
+            lastFrameHash = nil
+        }
         performCapture()
     }
 
     // MARK: - Lifecycle & Notifications
 
     private func setupNotificationObservers() {
-        NotificationCenter.default.addObserver(
+        let t1 = NotificationCenter.default.addObserver(
             forName: UIApplication.willResignActiveNotification,
             object: nil,
             queue: .main
@@ -93,7 +137,7 @@ public final class ScreenCapturer {
             }
         }
 
-        NotificationCenter.default.addObserver(
+        let t2 = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: .main
@@ -103,7 +147,7 @@ public final class ScreenCapturer {
             }
         }
 
-        NotificationCenter.default.addObserver(
+        let t3 = NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil,
             queue: .main
@@ -113,7 +157,7 @@ public final class ScreenCapturer {
             }
         }
 
-        NotificationCenter.default.addObserver(
+        let t4 = NotificationCenter.default.addObserver(
             forName: UIApplication.willTerminateNotification,
             object: nil,
             queue: .main
@@ -124,7 +168,7 @@ public final class ScreenCapturer {
         }
 
         // Keyboard tracking
-        NotificationCenter.default.addObserver(
+        let t5 = NotificationCenter.default.addObserver(
             forName: UIResponder.keyboardWillChangeFrameNotification,
             object: nil,
             queue: .main
@@ -137,7 +181,7 @@ public final class ScreenCapturer {
             }
         }
 
-        NotificationCenter.default.addObserver(
+        let t6 = NotificationCenter.default.addObserver(
             forName: UIResponder.keyboardWillHideNotification,
             object: nil,
             queue: .main
@@ -147,6 +191,8 @@ public final class ScreenCapturer {
                 self?.keyboardFrame = nil
             }
         }
+
+        observerTokens = [t1, t2, t3, t4, t5, t6]
     }
 
     private func pauseTimer() {
@@ -159,6 +205,7 @@ public final class ScreenCapturer {
     private func resumeTimer() {
         guard isRunning, isPaused else { return }
         isPaused = false
+        lastFrameHash = nil
         restartTimer()
         performCapture()
     }
@@ -167,7 +214,14 @@ public final class ScreenCapturer {
         timer?.cancel()
         timer = nil
 
-        let intervalMs = Int((1.0 / effectiveFps) * 1000.0)
+        guard let pFps = periodicFps else {
+            // Nil periodic FPS (dormant state) cancels the timer completely
+            return
+        }
+
+        let clampedFps = min(pFps, effectiveFps)
+        guard clampedFps > 0 else { return }
+        let intervalMs = max(1, Int((1.0 / clampedFps) * 1000.0))
         let newTimer = DispatchSource.makeTimerSource(queue: .main)
         newTimer.schedule(deadline: .now() + .milliseconds(intervalMs), repeating: .milliseconds(intervalMs))
         newTimer.setEventHandler { [weak self] in
@@ -183,13 +237,13 @@ public final class ScreenCapturer {
 
     private func performCapture() {
         // Strict GPU & Background Guard: prevent 0xbaadca11 termination
-        guard UIApplication.shared.applicationState == .active else {
+        guard isAppActive() else {
             return
         }
 
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        let windows = getVisibleWindows()
+        let windows = windowProvider?() ?? getVisibleWindows()
         guard let primaryWindow = windows.first(where: { $0.isKeyWindow }) ?? windows.first else {
             return
         }
@@ -215,7 +269,7 @@ public final class ScreenCapturer {
 
         // Check if active first responder is sensitive
         let isFirstResponderSensitive = windows.contains { window in
-            MaskingRules.isSensitiveFirstResponderActive(in: window, maskAllText: self.maskAllText)
+            self.isSensitiveFirstResponderChecker(window, self.maskAllText)
         }
 
         let capturedImage = renderer.image { ctx in
@@ -225,24 +279,40 @@ public final class ScreenCapturer {
                 // Align window coordinate system to canvas
                 let originInCanvas = primaryWindow.convert(window.bounds.origin, from: window)
                 ctx.cgContext.translateBy(x: originInCanvas.x, y: originInCanvas.y)
-                window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                let drawn = window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                if !drawn {
+                    window.layer.render(in: ctx.cgContext)
+                }
                 ctx.cgContext.restoreGState()
             }
 
             // 2. Keyboard masking: if active first responder is sensitive, mask keyboard area
-            if isFirstResponderSensitive, let kFrame = self.keyboardFrame, self.isKeyboardVisible {
-                let convertedKFrame = primaryWindow.convert(kFrame, from: nil)
-                let intersection = convertedKFrame.intersection(canvasBounds)
-                if !intersection.isNull && !intersection.isEmpty {
-                    hasMaskedContent = true
-                    drawMaskBlock(in: intersection, context: ctx.cgContext)
+            if isFirstResponderSensitive {
+                if let kFrame = self.keyboardFrame, self.isKeyboardVisible {
+                    let convertedKFrame = primaryWindow.convert(kFrame, from: nil)
+                    let intersection = convertedKFrame.intersection(canvasBounds)
+                    if !intersection.isNull && !intersection.isEmpty {
+                        hasMaskedContent = true
+                        drawMaskBlock(in: intersection, context: ctx.cgContext)
+                    }
+                }
+                for window in windows {
+                    let clsName = String(describing: type(of: window))
+                    if clsName.contains("KeyboardWindow") || clsName.contains("TextEffectsWindow") {
+                        let winRect = primaryWindow.convert(window.bounds, from: window)
+                        let intersection = winRect.intersection(canvasBounds)
+                        if !intersection.isNull && !intersection.isEmpty {
+                            hasMaskedContent = true
+                            drawMaskBlock(in: intersection, context: ctx.cgContext)
+                        }
+                    }
                 }
             }
 
             // 3. Collect and paint all masked view rects
             do {
                 for window in windows {
-                    let rects = MaskingRules.collectMaskRects(in: window, maskAllText: self.maskAllText)
+                    let rects = try self.maskCollector(window, self.maskAllText)
                     for rect in rects {
                         let canvasRect = primaryWindow.convert(rect, from: window)
                         let clipped = canvasRect.intersection(canvasBounds)
@@ -330,11 +400,10 @@ public final class ScreenCapturer {
 
     // MARK: - Watchdog
 
-    private func handleWatchdog(captureElapsed: TimeInterval) {
-        let nowUptime = ProcessInfo.processInfo.systemUptime
+    internal func handleWatchdog(captureElapsed: TimeInterval, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         if captureElapsed > 0.016 { // > 16ms of main-thread time
             slowCaptureCount += 1
-            lastSlowCaptureUptime = nowUptime
+            lastSlowCaptureUptime = now
             if slowCaptureCount >= 3 {
                 // Halve fps (min 0.5)
                 let newFps = max(0.5, effectiveFps / 2.0)
@@ -346,7 +415,7 @@ public final class ScreenCapturer {
             }
         } else {
             // Restore fps after 10s without a slow capture
-            if effectiveFps < targetFps && (nowUptime - lastSlowCaptureUptime >= 10.0) {
+            if effectiveFps < targetFps && (now - lastSlowCaptureUptime >= 10.0) {
                 effectiveFps = targetFps
                 restartTimer()
             }
@@ -383,6 +452,9 @@ public final class ScreenCapturer {
 
     deinit {
         timer?.cancel()
+        for token in observerTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
     }
 }
 #endif

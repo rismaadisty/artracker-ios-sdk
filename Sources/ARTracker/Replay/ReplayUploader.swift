@@ -45,9 +45,44 @@ public enum ReplayUploadError: Error, Sendable, LocalizedError {
     }
 }
 
+/// Protocol defining replay upload operations for chunk transmission and remote config fetching.
+public protocol ReplayUploading: Sendable {
+    func fetchReplayConfig(
+        completion: @escaping @Sendable (Result<ReplayRemoteConfig, Error>) -> Void
+    )
+
+    func requestChunkUrl(
+        sessionId: String,
+        chunkSeq: Int,
+        sizeBytes: Int,
+        userId: String?,
+        environment: String,
+        startTime: String,
+        format: String,
+        completion: @escaping @Sendable (Result<(uploadUrl: URL, objectKey: String), Error>) -> Void
+    )
+
+    func uploadGzipData(
+        uploadUrl: URL,
+        gzipData: Data,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    )
+
+    func acknowledgeChunk(
+        sessionId: String,
+        chunkSeq: Int,
+        sizeBytes: Int,
+        durationMs: Double,
+        eventCount: Int,
+        hasError: Bool,
+        hasRageClick: Bool,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    )
+}
+
 /// Network uploader for replay chunks.
 /// Uses an isolated ephemeral URLSession that bypasses ARTrackerURLProtocol to prevent infinite loops.
-public final class ReplayUploader: @unchecked Sendable {
+public final class ReplayUploader: ReplayUploading, @unchecked Sendable {
     private let endpoint: URL
     private let appKey: String
     private let session: URLSession
@@ -91,7 +126,8 @@ public final class ReplayUploader: @unchecked Sendable {
 
             guard (200...299).contains(http.statusCode), let data = data else {
                 let msg = data.flatMap { String(data: $0, encoding: .utf8) }
-                completion(.failure(ReplayUploadError.httpError(statusCode: http.statusCode, message: msg, retryAfter: nil)))
+                let retrySeconds = Backoff.parseRetryAfter(http.value(forHTTPHeaderField: "Retry-After"))
+                completion(.failure(ReplayUploadError.httpError(statusCode: http.statusCode, message: msg, retryAfter: retrySeconds)))
                 return
             }
 
@@ -165,8 +201,7 @@ public final class ReplayUploader: @unchecked Sendable {
 
             guard let http = http, (200...299).contains(http.statusCode), let data = data else {
                 let msg = data.flatMap { String(data: $0, encoding: .utf8) }
-                let retryAfterStr = http?.value(forHTTPHeaderField: "Retry-After")
-                let retrySeconds = retryAfterStr.flatMap { Double($0) }
+                let retrySeconds = Backoff.parseRetryAfter(http?.value(forHTTPHeaderField: "Retry-After"))
                 completion(.failure(ReplayUploadError.httpError(statusCode: statusCode, message: msg, retryAfter: retrySeconds)))
                 return
             }
