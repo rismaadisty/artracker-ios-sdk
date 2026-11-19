@@ -325,6 +325,11 @@ Seluruh pengujian dan bukti benchmark tersimpan di folder [`docs/evidence/`](doc
 
 * **Startup Phase A Benchmark**: [`docs/evidence/launch-metrics.txt`](docs/evidence/launch-metrics.txt)
   * **Median**: `0.140 ms` | **p95**: `0.180 ms` (Budget: `<= 2.0 ms` di main thread).
+* **Startup Profiler Benchmark**: [`docs/evidence/startup-profiler.txt`](docs/evidence/startup-profiler.txt)
+  * **Mean Sample Cost**: `~0.026 ms` (Budget: `<= 1.0 ms` per Mach stack sample).
+  * **Sampler Start Overhead**: `p95 = 0.072 ms` (Budget: `<= 1.0 ms` main thread).
+  * **Tracking Phase A Setup Overhead**: `p95 = 0.140 ms` (Budget: `<= 1.0 ms` main thread).
+  * **Stress Test Resiliency**: Berhasil mengambil `> 4.300` stack samples pada thread target yang melakukan looping alokasi memori acak (`malloc`/`free`), pembentukan String, dan penguncian `os_unfair_lock` serta `DispatchQueue.sync` tanpa deadlock maupun crash.
 * **CPU Idle Overhead Profile**: [`docs/evidence/cpu-trace.txt`](docs/evidence/cpu-trace.txt)
   * **Overhead CPU**: `0.05%` (Budget: `< 0.5%` foreground idle).
 * **Offline SQLite WAL & Gzip Ingestion**: [`docs/evidence/e2e-offline.md`](docs/evidence/e2e-offline.md)
