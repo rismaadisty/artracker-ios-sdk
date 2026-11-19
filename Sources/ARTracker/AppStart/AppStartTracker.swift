@@ -51,6 +51,11 @@ public enum LaunchContext: Sendable, Equatable {
     case activeAlready
 }
 
+public protocol FirstFrameHook: AnyObject, Sendable {
+    func await(_ onFrame: @escaping () -> Void)
+    func cancel()
+}
+
 public final class AppStartTracker {
     public static let lateInitNs: UInt64 = 10_000_000_000
     public static let maxColdNs: UInt64 = 60_000_000_000
@@ -79,6 +84,13 @@ public final class AppStartTracker {
         _awaitingFirstFrame
     }
 
+    public var isProfiled: Bool {
+        if case .cold(_, _, _, _, _, let profiled) = activeTracking {
+            return profiled
+        }
+        return false
+    }
+
     public init(
         processStartNs: UInt64?,
         preMainEndNs: UInt64?,
@@ -91,6 +103,21 @@ public final class AppStartTracker {
         self.newId = newId
         self.onReport = onReport
         self.onColdAbandoned = onColdAbandoned
+    }
+
+    public convenience init(
+        processTimes: ProcessTimes,
+        newId: @escaping () -> String = { UUID().uuidString.lowercased() },
+        onReport: @escaping (AppStartRecord) -> Void,
+        onColdAbandoned: @escaping () -> Void
+    ) {
+        self.init(
+            processStartNs: processTimes.processStartNs,
+            preMainEndNs: processTimes.preMainEndNs,
+            newId: newId,
+            onReport: onReport,
+            onColdAbandoned: onColdAbandoned
+        )
     }
 
     public func configured(at ns: UInt64, context: LaunchContext, profiled: Bool) {
