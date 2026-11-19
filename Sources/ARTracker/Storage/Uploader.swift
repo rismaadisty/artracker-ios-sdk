@@ -177,7 +177,7 @@ public final class Uploader: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(appKey, forHTTPHeaderField: "X-Artracker-Key")
-        request.setValue("artracker-ios/0.1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("artracker-ios/0.2.0", forHTTPHeaderField: "User-Agent")
 
         if batch.isGzip {
             request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")

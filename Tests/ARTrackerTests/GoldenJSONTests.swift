@@ -31,7 +31,7 @@ final class GoldenJSONTests: XCTestCase {
 
         let envelope = Envelope(
             sentAt: "2026-11-05T10:14:00.120Z",
-            sdk: SDKInfo(name: "artracker-ios", version: "0.1.0"),
+            sdk: SDKInfo(name: "artracker-ios", version: "0.2.0"),
             context: context,
             items: [crashItem]
         )
@@ -46,7 +46,7 @@ final class GoldenJSONTests: XCTestCase {
 
         let sdk = jsonObject?["sdk"] as? [String: Any]
         XCTAssertEqual(sdk?["name"] as? String, "artracker-ios")
-        XCTAssertEqual(sdk?["version"] as? String, "0.1.0")
+        XCTAssertEqual(sdk?["version"] as? String, "0.2.0")
 
         let ctx = jsonObject?["context"] as? [String: Any]
         XCTAssertEqual(ctx?["environment"] as? String, "production")
@@ -201,6 +201,78 @@ final class GoldenJSONTests: XCTestCase {
         XCTAssertEqual(samples[1]["net"] as? String, "wifi")
         XCTAssertNil(samples[1]["battery"])
         XCTAssertFalse(samples[1].values.contains { $0 is NSNull })
+    }
+
+    func testIdentifyItemGoldenJSON() throws {
+        let identifyItem = Item(
+            id: "itm_identify_123",
+            type: .event,
+            name: "$identify",
+            timestamp: "2026-11-19T10:00:00.000Z",
+            sessionId: "ses_identity_abc",
+            userId: "u_1029",
+            attributes: [
+                "plan": .string("pro"),
+                "is_active": .bool(true),
+                "credits": .number(150)
+            ]
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(identifyItem)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(json["id"] as? String, "itm_identify_123")
+        XCTAssertEqual(json["type"] as? String, "event")
+        XCTAssertEqual(json["name"] as? String, "$identify")
+        XCTAssertEqual(json["session_id"] as? String, "ses_identity_abc")
+        XCTAssertEqual(json["user_id"] as? String, "u_1029")
+        XCTAssertEqual(json["timestamp"] as? String, "2026-11-19T10:00:00.000Z")
+
+        let attrs = try XCTUnwrap(json["attributes"] as? [String: Any])
+        XCTAssertEqual(attrs["plan"] as? String, "pro")
+        XCTAssertEqual(attrs["is_active"] as? Bool, true)
+        XCTAssertEqual(attrs["credits"] as? Int, 150)
+    }
+
+    func testSessionStartDeviceContextGoldenJSON() throws {
+        let attrs = SessionContext.startAttributes(
+            config: ARTrackerConfig(environment: "production", appVersion: "2.1.0"),
+            launchType: "cold",
+            sessionId: "ses_start_test"
+        )
+
+        let startItem = Item(
+            id: "itm_start_123",
+            type: .session,
+            name: "session_start",
+            timestamp: "2026-11-19T10:00:00.000Z",
+            sessionId: "ses_start_test",
+            userId: "u_prior",
+            attributes: attrs
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(startItem)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(json["type"] as? String, "session")
+        XCTAssertEqual(json["name"] as? String, "session_start")
+        XCTAssertEqual(json["session_id"] as? String, "ses_start_test")
+        XCTAssertEqual(json["user_id"] as? String, "u_prior")
+
+        let parsedAttrs = try XCTUnwrap(json["attributes"] as? [String: Any])
+        XCTAssertEqual(parsedAttrs["platform"] as? String, "ios")
+        XCTAssertEqual(parsedAttrs["manufacturer"] as? String, "Apple")
+        XCTAssertEqual(parsedAttrs["launch_type"] as? String, "cold")
+        XCTAssertEqual(parsedAttrs["app_version"] as? String, "2.1.0")
+        XCTAssertNotNil(parsedAttrs["model"])
+        XCTAssertNotNil(parsedAttrs["os_version"])
+        XCTAssertNotNil(parsedAttrs["locale"])
+        XCTAssertNotNil(parsedAttrs["tz"])
+        XCTAssertNotNil(parsedAttrs["sdk_version"])
     }
 }
 

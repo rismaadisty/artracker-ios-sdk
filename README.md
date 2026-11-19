@@ -36,14 +36,14 @@ Tambahkan dependensi paket ke dalam file `Package.swift` proyek Anda:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/artracker/artracker-ios-sdk.git", from: "0.1.0")
+    .package(url: "https://github.com/artracker/artracker-ios-sdk.git", from: "0.2.0")
 ]
 ```
 
 Atau melalui Xcode:
 1. Pilih **File** > **Add Package Dependencies...**
 2. Masukkan repository URL: `https://github.com/artracker/artracker-ios-sdk.git`
-3. Pilih dependency rule **Up to Next Major Version** (`0.1.0`).
+3. Pilih dependency rule **Up to Next Major Version** (`0.2.0`).
 4. Centang target aplikasi Anda untuk menyertakan library **ARTracker**.
 
 ---
@@ -173,13 +173,31 @@ textField.accessibilityIdentifier = "mask:view"
 ### 2. Pencatatan Breadcrumbs & User Identity
 
 ```swift
-// Identitas Pengguna
-ARTracker.setUser(id: "user_usr_12345")
+// Identifikasi pengguna beserta atribut/traits
+ARTracker.identify(
+    userId: "user_usr_12345",
+    traits: [
+        "name": "Alex Pratama",
+        "email": "alex@example.com",
+        "plan": "premium",
+        "company_id": 42
+    ]
+)
+
+// Menghapus identitas pengguna saat logout
+ARTracker.reset()
 
 // Jejak navigasi / UI Breadcrumbs
 ARTracker.breadcrumb("User menekan tombol checkout", category: "ui")
 ARTracker.breadcrumb("Navigasi ke OrderDetailView", category: "navigation", type: "navigation")
 ```
+
+> **Catatan Validasi & Limitasi Traits:**
+> - Maksimal 50 key per pemanggilan `identify` (diurutkan berdasarkan abjad).
+> - Panjang key 1–64 karakter; panjang string value maksimal 256 karakter.
+> - Nilai yang didukung: `String`, `Bool`, `Int`, `Double`, dan `NSNull` (menghapus atribut).
+> - Key yang mengandung data sensitif (`password`, `secret`, `token`, `api_key`, `card`, `cvv`, `pin`, dll.) otomatis dibuang demi privasi.
+> - `ARTracker.setUser(id:)` telah ditandai *deprecated* dan dialihkan ke `identify` (jika non-nil) atau `reset` (jika nil).
 
 ### 3. Tangkapan Error Non-Fatal (`capture`)
 

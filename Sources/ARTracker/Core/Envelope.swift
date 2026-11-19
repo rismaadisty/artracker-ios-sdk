@@ -4,7 +4,7 @@ public struct SDKInfo: Codable, Sendable, Equatable {
     public let name: String
     public let version: String
 
-    public static let current = SDKInfo(name: "artracker-ios", version: "0.1.0")
+    public static let current = SDKInfo(name: "artracker-ios", version: "0.2.0")
 }
 
 public struct Envelope: Codable, Sendable, Equatable {
