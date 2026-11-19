@@ -16,6 +16,7 @@ public final class ARTracker: @unchecked Sendable {
     private var _uploader: Uploader?
     private var _perfMonitor: PerfMonitor?
     private var _identity: IdentityController?
+    private var pendingItems: [Item] = []
     private var sessionStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     private var currentDiskQueue: DiskQueue? { lock.withLock { _diskQueue } }
@@ -148,6 +149,7 @@ public final class ARTracker: @unchecked Sendable {
         lock.withLock {
             self._diskQueue = queue
         }
+        drainPendingItems(into: queue)
 
         // 3. Process Pending Crash Reports (PLCrashReporter)
         processPendingCrashReports(queue: queue)
@@ -511,6 +513,37 @@ public final class ARTracker: @unchecked Sendable {
 
     public func enqueueItem(_ item: Item) {
         _ = currentDiskQueue?.enqueue(item)
+    }
+
+    public func enqueueOrBuffer(_ item: Item) {
+        lock.withLock {
+            if let queue = _diskQueue {
+                _ = queue.enqueue(item)
+            } else {
+                if pendingItems.count >= 20 {
+                    pendingItems.removeFirst()
+                }
+                pendingItems.append(item)
+            }
+        }
+    }
+
+    internal func drainPendingItems(into queue: DiskQueue) {
+        let items: [Item] = lock.withLock {
+            let drained = pendingItems
+            pendingItems.removeAll()
+            return drained
+        }
+        for item in items {
+            _ = queue.enqueue(item)
+        }
+    }
+
+    internal func _testResetQueue() {
+        lock.withLock {
+            _diskQueue = nil
+            pendingItems.removeAll()
+        }
     }
 
     #if canImport(UIKit)

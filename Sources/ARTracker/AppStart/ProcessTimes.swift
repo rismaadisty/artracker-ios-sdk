@@ -5,6 +5,10 @@ public struct ProcessTimes: Sendable, Equatable {
     public let processStartNs: UInt64?
     public let preMainEndNs: UInt64?
 
+    public static func uptimeNanoseconds() -> UInt64 {
+        artn_now_ns()
+    }
+
     public static func current() -> ProcessTimes {
         let ctorUptime = artn_constructor_uptime_ns()
         let ctorWall = artn_constructor_wall_us()
