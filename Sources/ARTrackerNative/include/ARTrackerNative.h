@@ -13,6 +13,7 @@ uint64_t artn_now_ns(void);                         // clock_gettime_nsec_np(CLO
 uint64_t artn_constructor_uptime_ns(void);          // set by __attribute__((constructor))
 int64_t  artn_constructor_wall_us(void);            // gettimeofday() in the same constructor
 bool     artn_process_start_wall_us(int64_t *out);  // sysctl KERN_PROC_PID p_starttime, µs since epoch
+thread_t artn_main_mach_thread(void);               // pthread_mach_thread_np(pthread_main_thread_np())
 
 typedef struct { uint32_t max_samples, max_depth, interval_us, max_duration_ms; } artn_sampler_config;
 typedef struct artn_sampler artn_sampler;

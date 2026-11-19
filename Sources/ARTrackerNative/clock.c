@@ -3,6 +3,9 @@
 #include <sys/time.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <pthread.h>
+
+extern pthread_t pthread_main_thread_np(void);
 
 static uint64_t s_constructor_uptime_ns = 0;
 static int64_t  s_constructor_wall_us = 0;
@@ -42,4 +45,8 @@ bool artn_process_start_wall_us(int64_t *out) {
     }
     *out = (int64_t)start.tv_sec * 1000000LL + (int64_t)start.tv_usec;
     return true;
+}
+
+thread_t artn_main_mach_thread(void) {
+    return pthread_mach_thread_np(pthread_main_thread_np());
 }
