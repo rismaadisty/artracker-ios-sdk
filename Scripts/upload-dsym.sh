@@ -8,6 +8,8 @@
 #   -k, --api-key <key>    ARTracker API Key (or ARTRACKER_API_KEY env var)
 #   -u, --url <url>        ARTracker Base URL (default: https://artracker.exlm.my.id)
 #   -a, --app-id <bundle>  App Bundle Identifier (or PRODUCT_BUNDLE_IDENTIFIER env var)
+#   -r, --version <ver>    Release / App Version (default: $MARKETING_VERSION from Xcode or 1.0.0)
+#   -b, --build <num>      Build Number (default: $CURRENT_PROJECT_VERSION from Xcode)
 #   -v, --verbose          Enable verbose output
 #   -h, --help             Show this help message
 #
@@ -23,6 +25,8 @@ DEFAULT_URL="https://artracker.exlm.my.id"
 API_KEY="${ARTRACKER_API_KEY:-}"
 BASE_URL="${ARTRACKER_URL:-$DEFAULT_URL}"
 APP_ID="${PRODUCT_BUNDLE_IDENTIFIER:-}"
+APP_VERSION="${MARKETING_VERSION:-${APP_VERSION:-}}"
+BUILD_NUMBER="${CURRENT_PROJECT_VERSION:-${BUILD_NUMBER:-}}"
 VERBOSE=false
 TARGET_PATH=""
 
@@ -38,9 +42,11 @@ Arguments:
                          If omitted, uses Xcode environment variables.
 
 Options:
-  -k, --api-key <KEY>    ARTracker API Key (can also set ARTRACKER_API_KEY)
+  -k, --api-key <KEY>    ARTracker Secret Key (art_sec_...)
   -u, --url <URL>        Backend Base URL (default: $DEFAULT_URL)
   -a, --app-id <ID>      App Bundle Identifier (can also set PRODUCT_BUNDLE_IDENTIFIER)
+  -r, --version <VER>    Release Version (can also set MARKETING_VERSION)
+  -b, --build <NUM>      Build Number (can also set CURRENT_PROJECT_VERSION)
   -v, --verbose          Print debug info
   -h, --help             Show this help
 EOF
@@ -59,6 +65,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -a|--app-id)
             APP_ID="$2"
+            shift 2
+            ;;
+        -r|--version)
+            APP_VERSION="$2"
+            shift 2
+            ;;
+        -b|--build)
+            BUILD_NUMBER="$2"
             shift 2
             ;;
         -v|--verbose)
@@ -92,6 +106,19 @@ if [[ -z "$TARGET_PATH" ]]; then
     fi
 fi
 
+# Fallback to Info.plist if MARKETING_VERSION not available in environment
+if [[ -z "$APP_VERSION" && -n "${PRODUCT_SETTINGS_PATH:-}" && -f "${PRODUCT_SETTINGS_PATH:-}" ]]; then
+    APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PRODUCT_SETTINGS_PATH" 2>/dev/null || echo "")
+fi
+if [[ -z "$BUILD_NUMBER" && -n "${PRODUCT_SETTINGS_PATH:-}" && -f "${PRODUCT_SETTINGS_PATH:-}" ]]; then
+    BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$PRODUCT_SETTINGS_PATH" 2>/dev/null || echo "")
+fi
+
+# Default fallback to 1.0.0 if not specified
+if [[ -z "$APP_VERSION" ]]; then
+    APP_VERSION="1.0.0"
+fi
+
 if [[ -z "$API_KEY" ]]; then
     echo "❌ Error: API Key is required. Pass --api-key or export ARTRACKER_API_KEY." >&2
     exit 1
@@ -112,6 +139,7 @@ echo "=========================================================="
 echo " ARTracker dSYM Uploader"
 echo " Endpoint: $BASE_URL"
 echo " Target:   $TARGET_PATH"
+echo " Version:  $APP_VERSION${BUILD_NUMBER:+ (Build $BUILD_NUMBER)}"
 echo "=========================================================="
 
 # Collect all .dSYM bundles
@@ -160,12 +188,16 @@ for dsym in "${DSYM_BUNDLES[@]}"; do
     echo "  Archive Size: $(( FILE_SIZE / 1024 )) KB"
 
     # Upload to backend symbols endpoint
-    UPLOAD_URL="${BASE_URL%/}/api/v1/symbols"
+    UPLOAD_URL="${BASE_URL%/}/api/v1/symbols?version=${APP_VERSION}"
+    if [[ -n "$BUILD_NUMBER" ]]; then
+        UPLOAD_URL="${UPLOAD_URL}&build=${BUILD_NUMBER}"
+    fi
     echo "  Uploading to ${UPLOAD_URL}..."
 
     HTTP_STATUS=$(curl -s -o "${TEMP_DIR}/response.txt" -w "%{http_code}" \
         -X POST "$UPLOAD_URL" \
         -H "X-Artracker-Key: $API_KEY" \
+        -H "X-App-Version: $APP_VERSION" \
         -F "file=@${ZIP_FILE}" \
         -F "app_id=${APP_ID}" \
         -F "uuids=${UUIDS}" \
@@ -177,8 +209,21 @@ for dsym in "${DSYM_BUNDLES[@]}"; do
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
         echo "  ⚠️ Upload returned HTTP $HTTP_STATUS"
-        if [[ "$VERBOSE" == true ]] || [[ -s "${TEMP_DIR}/response.txt" ]]; then
-            echo "  Response: $(cat "${TEMP_DIR}/response.txt")"
+        RESP=$(cat "${TEMP_DIR}/response.txt" 2>/dev/null || echo "")
+        echo "  Response: $RESP"
+        
+        if [[ "$HTTP_STATUS" == "400" && "$RESP" =~ "release version is required" ]]; then
+            echo ""
+            echo "  💡 Hint: Versi rilis aplikasi wajib disertakan."
+            echo "     Gunakan opsi --version <versi> (contoh: --version 1.0.0)"
+            echo "     atau pastikan MARKETING_VERSION terisi di target Xcode."
+            echo ""
+        elif [[ "$HTTP_STATUS" == "403" && "$RESP" =~ "secret key required" ]]; then
+            echo ""
+            echo "  💡 Hint: Key yang digunakan adalah Client/Public Key."
+            echo "     Endpoint ini mewajibkan Secret Key (art_sec_...)."
+            echo "     Silakan ambil Secret Key dari Project Settings -> API Keys di dashboard ARTracker."
+            echo ""
         fi
     fi
 done

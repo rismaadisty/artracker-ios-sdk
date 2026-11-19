@@ -35,5 +35,13 @@ final class CrashPayloadTests: XCTestCase {
         XCTAssertEqual(json?["name"] as? String, "MyLib")
         XCTAssertEqual(json?["load_address"] as? String, "0x1000")
     }
+
+    func testCleanBinaryImageName() {
+        XCTAssertEqual(PLCrashReporterEngine.cleanBinaryImageName("SampleApp.debug.dylib"), "SampleApp")
+        XCTAssertEqual(PLCrashReporterEngine.cleanBinaryImageName("SampleApp.dylib"), "SampleApp")
+        XCTAssertEqual(PLCrashReporterEngine.cleanBinaryImageName("UIKitCore.framework"), "UIKitCore")
+        XCTAssertEqual(PLCrashReporterEngine.cleanBinaryImageName("ARTrackerDemo"), "ARTrackerDemo")
+        XCTAssertEqual(PLCrashReporterEngine.cleanBinaryImageName("libsystem_kernel.dylib"), "libsystem_kernel")
+    }
 }
 

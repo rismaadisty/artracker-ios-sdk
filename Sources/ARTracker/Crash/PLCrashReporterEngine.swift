@@ -66,6 +66,18 @@ public final class PLCrashReporterEngine: CrashEngine, @unchecked Sendable {
         #endif
     }
 
+    internal static func cleanBinaryImageName(_ rawName: String) -> String {
+        var name = rawName
+        if name.hasSuffix(".debug.dylib") {
+            name = String(name.dropLast(".debug.dylib".count))
+        } else if name.hasSuffix(".dylib") {
+            name = String(name.dropLast(".dylib".count))
+        } else if name.hasSuffix(".framework") {
+            name = String(name.dropLast(".framework".count))
+        }
+        return name
+    }
+
     #if canImport(CrashReporter)
     private func parse(report: PLCrashReport, rawData: Data) -> CrashPayload {
         var errorType = "EXC_CRASH"
@@ -93,9 +105,19 @@ public final class PLCrashReporterEngine: CrashEngine, @unchecked Sendable {
                     crashedThread = "Thread \(thread.threadNumber)"
                     if let frames = thread.stackFrames as? [PLCrashReportStackFrameInfo] {
                         for (idx, frame) in frames.prefix(60).enumerated() {
-                            let addr = String(format: "0x%016llx", frame.instructionPointer)
-                            let sym = frame.symbolInfo?.symbolName ?? "???"
-                            stackLines.append("\(idx) \(sym) \(addr)")
+                            let ip = frame.instructionPointer
+                            let addr = String(format: "0x%016llx", ip)
+                            var imageName = "???"
+                            var baseOffsetStr = String(format: "0x0 + %llu", ip)
+
+                            if let img = report.image(forAddress: ip) {
+                                let raw = (img.imageName as NSString?)?.lastPathComponent ?? "???"
+                                imageName = Self.cleanBinaryImageName(raw)
+                                let offset = ip - img.imageBaseAddress
+                                baseOffsetStr = String(format: "0x%llx + %llu", img.imageBaseAddress, offset)
+                            }
+
+                            stackLines.append("\(idx)   \(imageName)   \(addr)   \(baseOffsetStr)")
                         }
                     }
                 }
@@ -105,7 +127,8 @@ public final class PLCrashReporterEngine: CrashEngine, @unchecked Sendable {
         var binaryImages: [BinaryImageInfo] = []
         if let images = report.images as? [PLCrashReportBinaryImageInfo] {
             for img in images.prefix(25) {
-                let name = (img.imageName as NSString?)?.lastPathComponent ?? "unknown"
+                let raw = (img.imageName as NSString?)?.lastPathComponent ?? "unknown"
+                let name = Self.cleanBinaryImageName(raw)
                 let loadAddr = String(format: "0x%016llx", img.imageBaseAddress)
                 let uuid = img.imageUUID ?? ""
                 binaryImages.append(BinaryImageInfo(uuid: uuid, name: name, loadAddress: loadAddr))
