@@ -75,7 +75,7 @@ public struct DeviceContext: Codable, Sendable, Equatable {
         return "\(short) (\(build))"
     }
 
-    private static func deviceModelIdentifier() -> String {
+    internal static func deviceModelIdentifier() -> String {
         var systemInfo = utsname()
         uname(&systemInfo)
         let machineMirror = Mirror(reflecting: systemInfo.machine)

@@ -274,5 +274,45 @@ final class GoldenJSONTests: XCTestCase {
         XCTAssertNotNil(parsedAttrs["tz"])
         XCTAssertNotNil(parsedAttrs["sdk_version"])
     }
+
+    func testAppStartItemMatchesWireContract() throws {
+        let record = AppStartRecord(
+            startId: "start_golden_123",
+            type: .cold,
+            anchorNs: 0,
+            durationMs: 1180,
+            phases: [AppStartPhase(name: "pre_main", ms: 120)],
+            firstScreen: "HomeVC",
+            profiled: true
+        )
+        let dateFmt = ISO8601DateFormatter()
+        dateFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let nowDate = dateFmt.date(from: "2026-11-19T10:00:01.180Z") ?? Date()
+        let item = AppStartItem.make(
+            record,
+            nowNs: 1_180_000_000,
+            now: nowDate,
+            sessionId: "ses_1",
+            userId: "u_1",
+            build: "217",
+            device: AppStartDevice(model: "iPhone15,3", osVersion: "18.1", ramMb: 6144, cores: 6)
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(item)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(json["type"] as? String, "perf")
+        XCTAssertEqual(json["name"] as? String, "app_start")
+
+        let attrs = try XCTUnwrap(json["attributes"] as? [String: Any])
+        let attrKeys = Array(attrs.keys).sorted()
+        XCTAssertEqual(attrKeys, ["build", "device", "duration_ms", "first_screen", "phases", "platform", "profiled", "start_id", "type", "v"])
+
+        let phases = try XCTUnwrap(attrs["phases"] as? [[String: Any]])
+        let phase0Keys = Array(phases[0].keys).sorted()
+        XCTAssertEqual(phase0Keys, ["ms", "name"])
+    }
 }
 

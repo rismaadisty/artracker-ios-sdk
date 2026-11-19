@@ -6,5 +6,7 @@ DerivedData/
 .swiftpm/xcode
 *.xcodeproj
 docs/
+!docs/evidence/
+!docs/evidence/*
 
 

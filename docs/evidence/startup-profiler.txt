@@ -1,0 +1,31 @@
+ARTracker Startup Profiler Gate Report
+Timestamp: 2026-11-19T10:07:13Z
+Toolchain: Apple Swift 6.x / macOS / iOS 15.0+
+
+Test Suite 'Selected tests' started at 2026-11-19 5:07:04.701 PM.
+Test Suite 'ARTrackerTests.xctest' started at 2026-11-19 5:07:04.702 PM.
+Test Suite 'StartupProfilerStressTests' started at 2026-11-19 5:07:04.702 PM.
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testMeanSampleCostUnderBudget]' started.
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testMeanSampleCostUnderBudget]' passed (3.257 seconds).
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testSamplerStartCostUnder1ms]' started.
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testSamplerStartCostUnder1ms]' passed (0.102 seconds).
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testSamplerSurvivesTargetHoldingMallocAndLocks]' started.
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testSamplerSurvivesTargetHoldingMallocAndLocks]' passed (5.111 seconds).
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testTrackingAddsUnder1msToPhaseA]' started.
+Test Case '-[ARTrackerTests.StartupProfilerStressTests testTrackingAddsUnder1msToPhaseA]' passed (0.002 seconds).
+Test Suite 'StartupProfilerStressTests' passed at 2026-11-19 5:07:13.175 PM.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 8.472 (8.473) seconds
+Test Suite 'ARTrackerTests.xctest' passed at 2026-11-19 5:07:13.175 PM.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 8.472 (8.473) seconds
+Test Suite 'Selected tests' passed at 2026-11-19 5:07:13.175 PM.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 8.472 (8.474) seconds
+Mean Sample Cost: 26394 ns across 300 samples
+Sampler Start Benchmark: min=0.012ms median=0.023ms p95=0.072ms max=1.058ms
+Stress test taken samples: 4348
+Tracking Phase A Overhead: min=0.008ms median=0.009ms p95=0.140ms max=0.595ms
+
+Gate Conditions:
+  - Mean Sample Cost <= 1,000,000 ns: PASS
+  - Sampler Start p95 <= 1.0 ms: PASS
+  - Tracking Setup Overhead p95 <= 1.0 ms: PASS
+Status: PASS
