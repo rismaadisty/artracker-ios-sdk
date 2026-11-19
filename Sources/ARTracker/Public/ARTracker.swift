@@ -15,11 +15,13 @@ public final class ARTracker: @unchecked Sendable {
     private var _diskQueue: DiskQueue?
     private var _uploader: Uploader?
     private var _perfMonitor: PerfMonitor?
+    private var _identity: IdentityController?
     private var sessionStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     private var currentDiskQueue: DiskQueue? { lock.withLock { _diskQueue } }
     private var currentUploader: Uploader? { lock.withLock { _uploader } }
     private var currentPerfMonitor: PerfMonitor? { lock.withLock { _perfMonitor } }
+    private var currentIdentity: IdentityController? { lock.withLock { _identity } }
     private var hasEmittedInitialSessionStart: Bool = false
 
     public static var isInstalled: Bool {
@@ -74,6 +76,11 @@ public final class ARTracker: @unchecked Sendable {
         self._appKey = appKey
         self._crashEngine = crashEngine
         self.sessionStartUptime = ProcessInfo.processInfo.systemUptime
+
+        let identity = IdentityController(session: SessionManager.shared)
+        lock.withLock {
+            self._identity = identity
+        }
 
         Self.applySessionConfig(config, to: SessionManager.shared)
         _ = SessionManager.shared.sessionId
@@ -207,8 +214,14 @@ public final class ARTracker: @unchecked Sendable {
         validateAPIKey(endpoint: endpoint, appKey: appKey, uploader: uploader)
 
         // 10. Automatic Session Lifecycle Event (aligned with Android)
-        SessionManager.shared.listener = self
-        sessionDidStart(id: SessionManager.shared.sessionId)
+        if let identity = currentIdentity {
+            identity.attachQueue(queue)
+            SessionManager.shared.listener = identity
+            identity.sessionDidStart(id: SessionManager.shared.sessionId)
+        } else {
+            SessionManager.shared.listener = self
+            sessionDidStart(id: SessionManager.shared.sessionId)
+        }
 
         Log.info("ARTracker Phase B completed. SDK active.")
     }
@@ -347,9 +360,35 @@ public final class ARTracker: @unchecked Sendable {
 
     // MARK: - Public Runtime API
 
+    public static func identify(userId: String, traits: [String: Any] = [:]) {
+        if let identity = shared.currentIdentity {
+            identity.identify(userId: userId, traits: traits)
+        } else {
+            // If called before configure, persist userId and let Phase A/B identity pick it up
+            let trimmed = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                SessionManager.shared.userId = trimmed
+                CrashContextStore.shared.recordUserId(trimmed)
+            }
+        }
+    }
+
+    public static func reset() {
+        if let identity = shared.currentIdentity {
+            identity.reset()
+        } else {
+            SessionManager.shared.userId = nil
+            CrashContextStore.shared.recordUserId(nil)
+        }
+    }
+
+    @available(*, deprecated, message: "Use identify(userId:traits:) / reset()")
     public static func setUser(id: String?) {
-        SessionManager.shared.userId = id
-        CrashContextStore.shared.recordUserId(id)
+        if let uid = id {
+            identify(userId: uid)
+        } else {
+            reset()
+        }
     }
 
     public static func setScreen(_ name: String) {

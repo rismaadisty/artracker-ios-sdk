@@ -14,14 +14,24 @@ final class SessionManagerTests: XCTestCase {
     }
 
     func testUserIdentityTracking() {
-        let manager = SessionManager()
+        let suiteName = "test.session.user.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = SessionManager(userDefaults: defaults)
         XCTAssertNil(manager.userId)
 
         manager.userId = "user_alice_42"
         XCTAssertEqual(manager.userId, "user_alice_42")
+        XCTAssertEqual(defaults.string(forKey: "artracker.user_id"), "user_alice_42")
+
+        // Restoring in new manager loads persisted user
+        let manager2 = SessionManager(userDefaults: defaults)
+        XCTAssertEqual(manager2.userId, "user_alice_42")
 
         manager.userId = nil
         XCTAssertNil(manager.userId)
+        XCTAssertNil(defaults.string(forKey: "artracker.user_id"))
     }
 
     func testManualSessionRotation() {

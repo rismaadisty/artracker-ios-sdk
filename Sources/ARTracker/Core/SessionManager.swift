@@ -60,6 +60,10 @@ public final class SessionManager: @unchecked Sendable {
         self.clock = clock
         self.userDefaults = userDefaults
 
+        if let defs = userDefaults, let storedUser = defs.string(forKey: "artracker.user_id"), !storedUser.isEmpty {
+            self._userId = storedUser
+        }
+
         let initialIdleTimeout: TimeInterval
         if let timeout = idleTimeout {
             initialIdleTimeout = ARTrackerConfig.normalizedSessionTimeout(timeout)
@@ -239,7 +243,18 @@ public final class SessionManager: @unchecked Sendable {
 
     public var userId: String? {
         get { lock.withLock { _userId } }
-        set { lock.withLock { _userId = newValue } }
+        set {
+            lock.withLock {
+                _userId = newValue
+                if let defs = userDefaults {
+                    if let val = newValue, !val.isEmpty {
+                        defs.set(val, forKey: "artracker.user_id")
+                    } else {
+                        defs.removeObject(forKey: "artracker.user_id")
+                    }
+                }
+            }
+        }
     }
 
     public func touch() {
