@@ -143,6 +143,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 | `debugLogging` | `Bool` | `false` | Menampilkan log internal SDK via OSLog di console debugger. |
 | `enablePerformanceMonitoring` | `Bool` | `false` | Mengaktifkan sampling performa foreground (CPU, RAM, FPS, jank, threads, thermal). |
 | `performanceSampleInterval` | `TimeInterval` | `1.0` | Interval sampling performa dalam detik (di-clamp `0.5...10.0`). |
+| `enableAppStartTracking` | `Bool` | `true` | Melacak durasi dan rincian fase start aplikasi (`cold`, `warm`, `hot`). |
+| `enableStartupProfiling` | `Bool` | `false` | Mengaktifkan Mach stack sampling thread utama beroverhead rendah saat cold start. |
+| `startupProfileSampleRate` | `Double` | `0.1` | Rasio sampling startup profiling saat cold launch (`0.0...1.0`, default 10%). |
 
 ---
 
@@ -277,6 +280,26 @@ SDK dilengkapi mekanisme keamanan **`DebuggerDetector`**:
   1. Hentikan (Stop) debugging di Xcode.
   2. Buka aplikasi secara independen langsung dari homescreen Simulator atau Device.
   3. Picu crash, lalu luncurkan kembali aplikasi. SDK akan membaca crash report via mmap storage dan mengirimkannya ke backend saat startup Fase B.
+
+### 7. App start & startup profiling
+
+SDK menyediakan pelacakan performa startup aplikasi secara otomatis dengan pemisahan fase dan profiling stack trace thread utama:
+
+* **Tipe Start (`cold`, `warm`, `hot`)**:
+  * **Cold Start**: Peluncuran proses baru dari nol (`process_start` sysctl `p_starttime` hingga frame pertama selesai digambar). Meliputi 5 fase terperinci: `pre_main` (sebelum `main()`), `pre_init` (hingga `ARTracker.configure`), `did_finish_launching`, `scene_activation`, dan `first_draw`.
+  * **Warm Start**: Peluncuran yang dipicu oleh *pre-warming* iOS (`ActivePrewarm == 1`) atau transisi ke foreground setelah proses diluncurkan dari background (misal background fetch / silent push). Terdiri dari 2 fase: `scene_activation` dan `first_draw` (ditambah `did_finish_launching` bila ada).
+  * **Hot Start**: Aplikasi kembali ke foreground setelah berada di background (terdiri dari fase `first_draw`).
+* **Titik Panggilan `ARTracker.configure`**:
+  * Panggil `ARTracker.configure` pada **baris pertama** di `application(_:didFinishLaunchingWithOptions:)` (UIKit) atau `App.init` (SwiftUI). Kode sebelum configure tetap dihitung durasinya dalam fase `pre_init`, namun tidak tercakup dalam sampling profiler.
+  * Bila `configure` dipanggil terlambat saat aplikasi sudah berstatus `.active`, metrik cold start dibatalkan secara aman guna mencegah anomali durasi 0 ms.
+* **Startup Stack Profiling & Sample Rate**:
+  * Profiling diaktifkan via `enableStartupProfiling = true` dan hanya berjalan pada **cold launch** sesuai rasio `startupProfileSampleRate` (default `0.1` / 10%).
+  * Sampler membaca stack trace thread utama menggunakan Mach thread suspend/resume setiap 10 ms (dengan batas dinamis bila overhead > 1 ms) dan otomatis berhenti tepat pada frame visual pertama.
+* **Format Event & Endpoint Profil**:
+  * Ringkasan performa start dikirim sebagai item bertipe `perf` dengan nama `app_start` via antrean ingest normal.
+  * Profil sampling stack trace dikompresi dengan Gzip dan diunggah ke endpoint `POST /api/v1/app-start/profiles`. File profil tersimpan maksimal 3 file dengan auto-pruning (kedaluwarsa 3 hari / 5 kali kegagalan).
+* **dSYM & Simbolikasi**:
+  * Stack trace profiler menyimpan alamat instruksi dan return address mentah. Unggah dSYM aplikasi menggunakan script [`Scripts/upload-dsym.sh`](Scripts/upload-dsym.sh) agar backend dapat merekonstruksi nama fungsi, file, dan nomor baris secara akurat.
 
 ---
 
