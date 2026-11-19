@@ -14,6 +14,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private let wifiOnly: Bool
     private let diskQueue: ReplayDiskQueue
     private let sessionIdProvider: @Sendable () -> String
+    private let userIdProvider: @Sendable () -> String?
     private let workerQueue = DispatchQueue(label: "com.artracker.replay.worker", qos: .utility)
 
     // Shared monotonic sequence counter
@@ -25,6 +26,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private var currentBufferBytes: Int = 0
     private var activeSessionId: String? = nil
     private var currentChunkSessionId: String? = nil
+    private var currentChunkUserId: String? = nil
 
     private let uptimeProvider: @Sendable () -> TimeInterval
     private let dateProvider: @Sendable () -> Date
@@ -49,6 +51,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
         wifiOnly: Bool = false,
         diskQueue: ReplayDiskQueue = ReplayDiskQueue(),
         sessionIdProvider: @escaping @Sendable () -> String = { SessionManager.shared.peekSessionId() ?? SessionManager.shared.sessionId },
+        userIdProvider: @escaping @Sendable () -> String? = { SessionManager.shared.userId },
         uptimeProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         dateProvider: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -57,6 +60,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
         self.wifiOnly = wifiOnly
         self.diskQueue = diskQueue
         self.sessionIdProvider = sessionIdProvider
+        self.userIdProvider = userIdProvider
         self.uptimeProvider = uptimeProvider
         self.dateProvider = dateProvider
         self.sessionStartUptime = uptimeProvider()
@@ -79,11 +83,11 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     // MARK: - Screenshot Appending
 
-    private func prepareSessionLocked(_ currentSession: String) {
-        if let chunkSession = currentChunkSessionId, chunkSession != currentSession {
-            if !screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty {
-                triggerFlushLocked(overrideEndUptime: lastEventUptime)
-            }
+    private func prepareSessionLocked(_ currentSession: String, _ currentUser: String?) {
+        let sessionChanged = (currentChunkSessionId != nil && currentChunkSessionId != currentSession)
+        let userChanged = (currentChunkUserId != currentUser && (!screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty))
+        if sessionChanged || userChanged {
+            triggerFlushLocked(overrideEndUptime: lastEventUptime)
         }
         if activeSessionId != currentSession {
             let isInitialBinding = (activeSessionId == nil && lastEventUptime == nil)
@@ -98,13 +102,17 @@ public final class ReplayChunkManager: @unchecked Sendable {
         if currentChunkSessionId == nil {
             currentChunkSessionId = currentSession
         }
+        if currentChunkUserId == nil {
+            currentChunkUserId = currentUser
+        }
     }
 
     public func appendScreenFrame(_ frame: ScreenFramePayload) {
         lock.withLock {
             guard !isScreenshotDisabled else { return }
             let currentSession = sessionIdProvider()
-            prepareSessionLocked(currentSession)
+            let currentUser = userIdProvider()
+            prepareSessionLocked(currentSession, currentUser)
             lastEventUptime = uptimeProvider()
 
             let frameBytes = frame.data.utf8.count
@@ -125,7 +133,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
         lock.withLock {
             guard !isScreenshotDisabled else { return }
             let currentSession = sessionIdProvider()
-            prepareSessionLocked(currentSession)
+            let currentUser = userIdProvider()
+            prepareSessionLocked(currentSession, currentUser)
             lastEventUptime = uptimeProvider()
             screenTouchBuffer.append(touch)
             if screenFrameBuffer.count >= 20 || screenTouchBuffer.count >= 200 {
@@ -203,7 +212,9 @@ public final class ReplayChunkManager: @unchecked Sendable {
         guard !screenFrameBuffer.isEmpty || !screenTouchBuffer.isEmpty else { return }
 
         let chunkSession = currentChunkSessionId ?? sessionIdProvider()
+        let chunkUser = currentChunkUserId ?? userIdProvider()
         currentChunkSessionId = nil
+        currentChunkUserId = nil
 
         let nowUptime = uptimeProvider()
         let effectiveEndUptime: TimeInterval
@@ -251,7 +262,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 hasRage: chunkHasRage,
                 startTime: sTime,
                 data: gzipped,
-                sessionId: chunkSession
+                sessionId: chunkSession,
+                userId: chunkUser
             )
             diskQueue.enqueue(item)
 
@@ -292,7 +304,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
             }
 
             let sessionId = queueItem.sessionId ?? self.sessionIdProvider()
-            let userId = SessionManager.shared.userId
+            let userId = queueItem.userId
 
             #if canImport(UIKit)
             var bgTask: UIBackgroundTaskIdentifier = .invalid

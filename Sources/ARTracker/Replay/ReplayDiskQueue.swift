@@ -13,6 +13,7 @@ public struct ReplayQueueItem: Codable, Sendable {
     public let createdAt: Date
     public let data: Data
     public let sessionId: String?
+    public let userId: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -25,7 +26,8 @@ public struct ReplayQueueItem: Codable, Sendable {
         startTime: String,
         createdAt: Date = Date(),
         data: Data,
-        sessionId: String? = nil
+        sessionId: String? = nil,
+        userId: String? = nil
     ) {
         self.id = id
         self.seq = seq
@@ -38,6 +40,7 @@ public struct ReplayQueueItem: Codable, Sendable {
         self.createdAt = createdAt
         self.data = data
         self.sessionId = sessionId
+        self.userId = userId
     }
 }
 
