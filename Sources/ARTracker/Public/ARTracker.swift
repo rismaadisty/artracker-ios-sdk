@@ -126,7 +126,7 @@ public final class ARTracker: @unchecked Sendable {
         LaunchMetrics.shared.markPhaseAEnd()
 
         // Transition to Fase B after first runloop cycle
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 self?.configurePhaseB()
             }

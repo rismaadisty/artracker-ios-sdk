@@ -72,5 +72,27 @@ final class ConfigTests: XCTestCase {
         config.sessionTimeout = 120
         XCTAssertEqual(config.sessionTimeout, 120)
     }
+
+    func testAppStartConfigDefaultsAndClamping() {
+        let defaultConfig = ARTrackerConfig()
+        XCTAssertTrue(defaultConfig.enableAppStartTracking)
+        XCTAssertFalse(defaultConfig.enableStartupProfiling)
+        XCTAssertEqual(defaultConfig.startupProfileSampleRate, 0.1)
+
+        let customConfig = ARTrackerConfig(
+            enableAppStartTracking: false,
+            enableStartupProfiling: true,
+            startupProfileSampleRate: 0.5
+        )
+        XCTAssertFalse(customConfig.enableAppStartTracking)
+        XCTAssertTrue(customConfig.enableStartupProfiling)
+        XCTAssertEqual(customConfig.startupProfileSampleRate, 0.5)
+
+        let tooLow = ARTrackerConfig(startupProfileSampleRate: -0.5)
+        XCTAssertEqual(tooLow.startupProfileSampleRate, 0.0)
+
+        let tooHigh = ARTrackerConfig(startupProfileSampleRate: 2.5)
+        XCTAssertEqual(tooHigh.startupProfileSampleRate, 1.0)
+    }
 }
 
