@@ -396,22 +396,54 @@ final class AppStartTrackerTests: XCTestCase {
         XCTAssertEqual(reported?.durationMs, 280)
     }
 
-    func testDebuggerAttachedAllowsUpTo30sLateConfigure() {
+    func testDebuggerAttachedStripsLLDBPreMainPauseFromColdDurationAndAnchor() {
         var reported: AppStartRecord?
         let tracker = AppStartTracker(
             processStartNs: ms(0),
-            preMainEndNs: ms(100),
+            preMainEndNs: ms(14_000), // 14s LLDB pause in dyld
             isDebuggerAttached: true,
             onReport: { reported = $0 },
             onColdAbandoned: {}
         )
 
-        tracker.configured(at: ms(18_000), context: .foreground, profiled: true)
-        tracker.didFinishLaunching(at: ms(18_100))
-        tracker.didBecomeActive(at: ms(18_200))
-        tracker.firstFrame(at: ms(18_300), screen: "Home")
+        tracker.configured(at: ms(14_100), context: .foreground, profiled: true)
+        tracker.didFinishLaunching(at: ms(14_200))
+        tracker.didBecomeActive(at: ms(14_300))
+        tracker.firstFrame(at: ms(14_450), screen: "Home")
 
-        XCTAssertEqual(reported?.type, .cold)
-        XCTAssertEqual(reported?.profiled, true)
+        guard let r = reported else {
+            XCTFail("Expected reported cold start record")
+            return
+        }
+        XCTAssertEqual(r.type, .cold)
+        XCTAssertTrue(r.profiled)
+        // Duration should be 450ms (from preMainEnd at 14_000 to firstFrame at 14_450), NOT 14_450ms
+        XCTAssertEqual(r.durationMs, 450)
+        XCTAssertEqual(r.anchorNs, ms(14_000))
+
+        let totalPhasesMs = r.phases.reduce(0) { $0 + $1.ms }
+        XCTAssertEqual(totalPhasesMs, 450)
+        XCTAssertFalse(r.phases.contains { $0.name == "pre_main" })
+    }
+
+    func testProductionDoesNotRebaseWhenDebuggerNotAttached() {
+        var reported: AppStartRecord?
+        var abandoned = false
+        let tracker = AppStartTracker(
+            processStartNs: ms(0),
+            preMainEndNs: ms(14_000),
+            isDebuggerAttached: false,
+            onReport: { reported = $0 },
+            onColdAbandoned: { abandoned = true }
+        )
+
+        // In production without debugger, 14s exceeds lateInitNs (10s) and gets abandoned
+        tracker.configured(at: ms(14_100), context: .foreground, profiled: true)
+        tracker.didFinishLaunching(at: ms(14_200))
+        tracker.didBecomeActive(at: ms(14_300))
+        tracker.firstFrame(at: ms(14_450), screen: "Home")
+
+        XCTAssertNil(reported)
+        XCTAssertTrue(abandoned)
     }
 }

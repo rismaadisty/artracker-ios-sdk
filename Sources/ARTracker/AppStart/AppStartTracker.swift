@@ -59,6 +59,7 @@ public protocol FirstFrameHook: AnyObject, Sendable {
 public final class AppStartTracker {
     public static let lateInitNs: UInt64 = 10_000_000_000
     public static let debugLateInitNs: UInt64 = 30_000_000_000
+    public static let debugMaxPreMainNs: UInt64 = 1_000_000_000 // 1s
     public static let maxColdNs: UInt64 = 60_000_000_000
     public static let maxWarmHotNs: UInt64 = 10_000_000_000
 
@@ -156,9 +157,21 @@ public final class AppStartTracker {
                 return
             }
 
+            let effectiveAnchor: UInt64
+            let effectivePreMainEnd: UInt64?
+            if isDebuggerAttached, let preMain = preMainEndNs, preMain > procStart, (preMain - procStart) > Self.debugMaxPreMainNs {
+                let pauseMs = (preMain - procStart) / 1_000_000
+                Log.info("app_start: debugger pause detected (\(pauseMs)ms before constructor); rebasing cold anchor to preMainEnd")
+                effectiveAnchor = preMain
+                effectivePreMainEnd = nil
+            } else {
+                effectiveAnchor = procStart
+                effectivePreMainEnd = preMainEndNs
+            }
+
             let allowedLateInitNs = isDebuggerAttached ? Self.debugLateInitNs : Self.lateInitNs
-            if ns > procStart && (ns - procStart) > allowedLateInitNs {
-                let elapsedMs = (ns - procStart) / 1_000_000
+            if ns > effectiveAnchor && (ns - effectiveAnchor) > allowedLateInitNs {
+                let elapsedMs = (ns - effectiveAnchor) / 1_000_000
                 Log.info("app_start not reported: configure called > \(allowedLateInitNs / 1_000_000_000)s after process start (\(elapsedMs)ms)")
                 abandonColdIfNeeded(wasProfiled: profiled)
                 activeTracking = nil
@@ -167,8 +180,8 @@ public final class AppStartTracker {
             }
 
             activeTracking = .cold(
-                anchorNs: procStart,
-                preMainEndNs: preMainEndNs,
+                anchorNs: effectiveAnchor,
+                preMainEndNs: effectivePreMainEnd,
                 configuredNs: ns,
                 didFinishLaunchingNs: nil,
                 didBecomeActiveNs: nil,
