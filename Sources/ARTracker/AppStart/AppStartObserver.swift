@@ -39,6 +39,7 @@ public final class AppStartObserver {
     private let now: () -> UInt64
     private let frameHook: FirstFrameHook
     private var isInstalled: Bool = false
+    private var backgroundCheckWorkItem: DispatchWorkItem?
 
     public init(
         tracker: AppStartTracker,
@@ -82,9 +83,11 @@ public final class AppStartObserver {
 
     @objc private func handleDidFinishLaunching() {
         tracker.didFinishLaunching(at: now())
+        scheduleBackgroundLaunchConfirmation()
     }
 
     @objc private func handleDidBecomeActive() {
+        cancelBackgroundLaunchConfirmation()
         tracker.didBecomeActive(at: now())
         if tracker.awaitingFirstFrame {
             frameHook.cancel()
@@ -100,8 +103,26 @@ public final class AppStartObserver {
     }
 
     @objc private func handleDidEnterBackground() {
+        cancelBackgroundLaunchConfirmation()
         frameHook.cancel()
         tracker.didEnterBackground(at: now())
+    }
+
+    private func scheduleBackgroundLaunchConfirmation() {
+        cancelBackgroundLaunchConfirmation()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if UIApplication.shared.applicationState == .background {
+                self.tracker.confirmBackgroundLaunchIfNotActive()
+            }
+        }
+        backgroundCheckWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: item)
+    }
+
+    private func cancelBackgroundLaunchConfirmation() {
+        backgroundCheckWorkItem?.cancel()
+        backgroundCheckWorkItem = nil
     }
 
     public static func topScreenName(window: UIWindow? = nil) -> String? {
@@ -146,11 +167,11 @@ public final class AppStartObserver {
         if environment["ActivePrewarm"] == "1" {
             return .prewarmed
         }
-        // Priority 3: .background
-        if appState == .background {
-            return .background
-        }
-        // Priority 4: foreground
+        // Priority 3: On iOS 13+, UIApplication.shared.applicationState is frequently `.background`
+        // during `application(_:didFinishLaunchingWithOptions:)` even on a normal foreground cold launch
+        // (before the first window/scene activates). Treat `.inactive` and `.background` as `.foreground`;
+        // true background launches never receive `didBecomeActive` immediately and are downgraded to
+        // `.warmBackground` on `willEnterForeground` (or abandoned on `didEnterBackground`).
         return .foreground
     }
 }

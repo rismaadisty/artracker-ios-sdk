@@ -24,7 +24,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 wifiOnly: false,
                 flushInterval: 5,
                 debugLogging: true,
-                enablePerformanceMonitoring: true
+                enablePerformanceMonitoring: true,
+                enableAppStartTracking: true,
+                enableStartupProfiling: true,
+                startupProfileSampleRate: 1.0
+                
             )
         )
 

@@ -84,6 +84,7 @@ public final class ProfileUploader: @unchecked Sendable {
             }
 
             if self.isDisabled || !self.canUpload() {
+                Log.info("ProfileUploader flush skipped (disabled: \(self.isDisabled), canUpload: \(self.canUpload()))")
                 completion?()
                 return
             }
@@ -116,6 +117,7 @@ public final class ProfileUploader: @unchecked Sendable {
         }
 
         let url = endpoint.appendingPathComponent("api/v1/app-start/profiles")
+        Log.info("Uploading startup profile (startId: \(p.startId), url: \(url.absoluteString), bytes: \(data.count))")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(appKey, forHTTPHeaderField: "X-Artracker-Key")
@@ -148,13 +150,15 @@ public final class ProfileUploader: @unchecked Sendable {
             }
 
             self.queue.async {
-                if error != nil {
+                if let error = error {
+                    Log.warn("Startup profile upload network error (startId: \(p.startId)): \(error.localizedDescription)")
                     self.store.markFailed(p)
                     completion?()
                     return
                 }
 
                 guard let http = response as? HTTPURLResponse else {
+                    Log.warn("Startup profile upload failed: invalid HTTP response (startId: \(p.startId))")
                     self.store.markFailed(p)
                     completion?()
                     return
@@ -162,16 +166,20 @@ public final class ProfileUploader: @unchecked Sendable {
 
                 switch http.statusCode {
                 case 200..<300:
+                    Log.info("Startup profile uploaded successfully (startId: \(p.startId), HTTP \(http.statusCode))")
                     self.store.delete(p)
                     self.uploadSequentially(items: items, index: index + 1, completion: completion)
                 case 413:
+                    Log.warn("Startup profile too large (HTTP 413), deleting (startId: \(p.startId))")
                     self.store.delete(p)
                     self.uploadSequentially(items: items, index: index + 1, completion: completion)
                 case 401, 403:
+                    Log.error("Startup profile upload rejected (HTTP \(http.statusCode)). ProfileUploader disabled.")
                     self.isDisabled = true
                     self.store.delete(p)
                     completion?()
                 default:
+                    Log.warn("Startup profile upload failed (HTTP \(http.statusCode), startId: \(p.startId))")
                     self.store.markFailed(p)
                     completion?()
                 }

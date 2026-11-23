@@ -70,9 +70,7 @@ public struct DeviceContext: Codable, Sendable, Equatable {
     }
 
     private static func defaultAppVersion() -> String {
-        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-        return "\(short) (\(build))"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
     }
 
     internal static func deviceModelIdentifier() -> String {

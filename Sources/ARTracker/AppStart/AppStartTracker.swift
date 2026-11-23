@@ -58,11 +58,13 @@ public protocol FirstFrameHook: AnyObject, Sendable {
 
 public final class AppStartTracker {
     public static let lateInitNs: UInt64 = 10_000_000_000
+    public static let debugLateInitNs: UInt64 = 30_000_000_000
     public static let maxColdNs: UInt64 = 60_000_000_000
     public static let maxWarmHotNs: UInt64 = 10_000_000_000
 
     private let processStartNs: UInt64?
     private let preMainEndNs: UInt64?
+    private let isDebuggerAttached: Bool
     private let newId: () -> String
     private let onReport: (AppStartRecord) -> Void
     private let onColdAbandoned: () -> Void
@@ -94,12 +96,14 @@ public final class AppStartTracker {
     public init(
         processStartNs: UInt64?,
         preMainEndNs: UInt64?,
+        isDebuggerAttached: Bool = false,
         newId: @escaping () -> String = { UUID().uuidString.lowercased() },
         onReport: @escaping (AppStartRecord) -> Void,
         onColdAbandoned: @escaping () -> Void
     ) {
         self.processStartNs = processStartNs
         self.preMainEndNs = preMainEndNs
+        self.isDebuggerAttached = isDebuggerAttached
         self.newId = newId
         self.onReport = onReport
         self.onColdAbandoned = onColdAbandoned
@@ -107,6 +111,7 @@ public final class AppStartTracker {
 
     public convenience init(
         processTimes: ProcessTimes,
+        isDebuggerAttached: Bool = false,
         newId: @escaping () -> String = { UUID().uuidString.lowercased() },
         onReport: @escaping (AppStartRecord) -> Void,
         onColdAbandoned: @escaping () -> Void
@@ -114,6 +119,7 @@ public final class AppStartTracker {
         self.init(
             processStartNs: processTimes.processStartNs,
             preMainEndNs: processTimes.preMainEndNs,
+            isDebuggerAttached: isDebuggerAttached,
             newId: newId,
             onReport: onReport,
             onColdAbandoned: onColdAbandoned
@@ -123,33 +129,37 @@ public final class AppStartTracker {
     public func configured(at ns: UInt64, context: LaunchContext, profiled: Bool) {
         switch context {
         case .activeAlready:
-            Log.debug("app_start not reported: app was already active at configure")
+            Log.info("app_start not reported: app was already active at configure")
             abandonColdIfNeeded(wasProfiled: profiled)
             activeTracking = nil
             _awaitingFirstFrame = false
 
         case .background:
+            Log.info("app_start: launched in background; waiting for foreground (cold profiling abandoned)")
             isInBackground = true
             abandonColdIfNeeded(wasProfiled: profiled)
             activeTracking = nil
             _awaitingFirstFrame = false
 
         case .prewarmed:
+            Log.info("app_start: launched prewarmed; tracking as warm start (cold profiling abandoned)")
             abandonColdIfNeeded(wasProfiled: profiled)
             activeTracking = .warmPrewarmed(anchorNs: ns, didFinishLaunchingNs: nil, didBecomeActiveNs: nil)
             _awaitingFirstFrame = false
 
         case .foreground:
             guard let procStart = processStartNs else {
-                Log.debug("app_start not reported: process start time unavailable")
+                Log.info("app_start not reported: process start time unavailable")
                 abandonColdIfNeeded(wasProfiled: profiled)
                 activeTracking = nil
                 _awaitingFirstFrame = false
                 return
             }
 
-            if ns > procStart && (ns - procStart) > Self.lateInitNs {
-                Log.debug("app_start not reported: configure called > 10s after process start")
+            let allowedLateInitNs = isDebuggerAttached ? Self.debugLateInitNs : Self.lateInitNs
+            if ns > procStart && (ns - procStart) > allowedLateInitNs {
+                let elapsedMs = (ns - procStart) / 1_000_000
+                Log.info("app_start not reported: configure called > \(allowedLateInitNs / 1_000_000_000)s after process start (\(elapsedMs)ms)")
                 abandonColdIfNeeded(wasProfiled: profiled)
                 activeTracking = nil
                 _awaitingFirstFrame = false
@@ -191,7 +201,34 @@ public final class AppStartTracker {
         }
     }
 
+    public func confirmBackgroundLaunchIfNotActive() {
+        guard !isInBackground, let current = activeTracking else { return }
+        if case .cold(_, _, _, _, nil, let profiled) = current {
+            Log.info("app_start: confirmed silent background launch; stopping cold profiler and waiting for foreground")
+            isInBackground = true
+            abandonColdIfNeeded(wasProfiled: profiled)
+            activeTracking = nil
+            _awaitingFirstFrame = false
+        }
+    }
+
+    public static let sceneColdForegroundWindowNs: UInt64 = 3_000_000_000
+
     public func willEnterForeground(at ns: UInt64) {
+        // On iOS 13+ scene-based apps (UISceneDelegate / SwiftUI), UIKit posts
+        // `UIApplication.willEnterForegroundNotification` during cold launch right before
+        // `didBecomeActiveNotification`. Ignore `willEnterForeground` unless:
+        // 1) the app actually entered background first (`isInBackground == true`), OR
+        // 2) a pending `.cold` launch has waited > 3s without `didBecomeActive` (meaning the
+        //    process was launched silently in the background and the user opened it later).
+        if !isInBackground {
+            if case .cold(_, _, let configured, _, nil, let profiled) = activeTracking,
+               ns > configured, (ns - configured) > Self.sceneColdForegroundWindowNs {
+                abandonColdIfNeeded(wasProfiled: profiled)
+                activeTracking = .warmBackground(anchorNs: ns, didBecomeActiveNs: nil)
+            }
+            return
+        }
         isInBackground = false
         _awaitingFirstFrame = false
 
@@ -249,7 +286,7 @@ public final class AppStartTracker {
     public func didEnterBackground(at ns: UInt64) {
         isInBackground = true
         if let current = activeTracking {
-            Log.debug("app_start not reported: app entered background before first frame")
+            Log.info("app_start not reported: app entered background before first frame")
             if case .cold(_, _, _, _, _, let profiled) = current {
                 abandonColdIfNeeded(wasProfiled: profiled)
             }
@@ -267,7 +304,7 @@ public final class AppStartTracker {
         case .cold(let anchor, let preMain, let configured, let didFinish, let active, let profiled):
             guard let activeNs = active else { return }
             if ns > anchor && (ns - anchor) > Self.maxColdNs {
-                Log.debug("app_start not reported: cold start exceeded 60s")
+                Log.info("app_start not reported: cold start exceeded 60s")
                 abandonColdIfNeeded(wasProfiled: profiled)
                 return
             }
@@ -299,7 +336,7 @@ public final class AppStartTracker {
         case .warmPrewarmed(let anchor, let didFinish, let active):
             guard let activeNs = active else { return }
             if ns > anchor && (ns - anchor) > Self.maxWarmHotNs {
-                Log.debug("app_start not reported: warm start exceeded 10s")
+                Log.info("app_start not reported: warm start exceeded 10s")
                 return
             }
 
@@ -326,7 +363,7 @@ public final class AppStartTracker {
         case .warmBackground(let anchor, let active):
             guard let activeNs = active else { return }
             if ns > anchor && (ns - anchor) > Self.maxWarmHotNs {
-                Log.debug("app_start not reported: warm start exceeded 10s")
+                Log.info("app_start not reported: warm start exceeded 10s")
                 return
             }
 
@@ -351,7 +388,7 @@ public final class AppStartTracker {
         case .hot(let anchor, let active):
             guard let activeNs = active else { return }
             if ns > anchor && (ns - anchor) > Self.maxWarmHotNs {
-                Log.debug("app_start not reported: hot start exceeded 10s")
+                Log.info("app_start not reported: hot start exceeded 10s")
                 return
             }
 

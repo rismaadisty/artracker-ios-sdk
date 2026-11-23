@@ -771,13 +771,21 @@ extension ARTracker {
         #endif
 
         let isCold = (context == .foreground || context == .prewarmed)
-        let profiled = config.enableStartupProfiling && isCold && (random() < config.startupProfileSampleRate)
+        let sampled = config.enableStartupProfiling && isCold && (random() < config.startupProfileSampleRate)
 
         var sampler: StartupSampler?
-        if profiled {
-            sampler = StartupSampler()
-            _ = sampler?.start()
+        var samplerStarted = false
+        if sampled {
+            if let s = StartupSampler(), s.start() {
+                sampler = s
+                samplerStarted = true
+            } else {
+                Log.warn("StartupSampler failed to initialize or start.")
+            }
         }
+        let profiled = sampled && samplerStarted
+
+        Log.info("AppStart tracking configured (context: \(context), isCold: \(isCold), enableProfiling: \(config.enableStartupProfiling), sampleRate: \(config.startupProfileSampleRate), profiled: \(profiled), hasProcessStart: \(times.processStartNs != nil))")
 
         let store = profileStore ?? lock.withLock { self._profileStore } ?? ProfileStore()
         lock.withLock {
@@ -786,8 +794,11 @@ extension ARTracker {
 
         let tracker = AppStartTracker(
             processTimes: times,
+            isDebuggerAttached: DebuggerDetector.isAttached,
             onReport: { [weak self] record in
                 sampler?.requestStop()
+
+                Log.info("AppStart reported (type: \(record.type.rawValue), durationMs: \(record.durationMs), profiled: \(record.profiled), startId: \(record.startId))")
 
                 let item = AppStartItem.make(record)
                 self?.enqueueOrBuffer(item)
@@ -813,6 +824,7 @@ extension ARTracker {
                         do {
                             let gzipData = try ProfileBody.gzip(envelope)
                             try store.save(startId: record.startId, body: gzipData)
+                            Log.info("Startup profile saved (startId: \(record.startId), samples: \(profile.samples.count), bytes: \(gzipData.count))")
                             self?.lock.withLock { self?._profileUploader }?.flush()
                         } catch {
                             Log.warn("Failed to save or gzip startup profile: \(error)")

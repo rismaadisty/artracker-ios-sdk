@@ -117,10 +117,11 @@ final class AppStartTrackerTests: XCTestCase {
             onColdAbandoned: { abandoned = true }
         )
 
-        tracker.configured(at: ms(10_001), context: .foreground, profiled: true)
-        tracker.didFinishLaunching(at: ms(10_100))
-        tracker.didBecomeActive(at: ms(10_200))
-        tracker.firstFrame(at: ms(10_300), screen: nil)
+        let lateNs = AppStartTracker.lateInitNs + ms(1)
+        tracker.configured(at: lateNs, context: .foreground, profiled: true)
+        tracker.didFinishLaunching(at: lateNs + ms(100))
+        tracker.didBecomeActive(at: lateNs + ms(200))
+        tracker.firstFrame(at: lateNs + ms(300), screen: nil)
 
         XCTAssertNil(reported)
         XCTAssertTrue(abandoned)
@@ -344,5 +345,73 @@ final class AppStartTrackerTests: XCTestCase {
         XCTAssertEqual(reports.count, 2)
         XCTAssertTrue(reports[0].profiled)
         XCTAssertFalse(reports[1].profiled)
+    }
+
+    func testWillEnterForegroundDuringColdLaunchDoesNotDowngradeColdToWarm() {
+        var reported: AppStartRecord?
+        var abandoned = 0
+        let tracker = AppStartTracker(
+            processStartNs: ms(0),
+            preMainEndNs: ms(100),
+            onReport: { reported = $0 },
+            onColdAbandoned: { abandoned += 1 }
+        )
+
+        tracker.configured(at: ms(200), context: .foreground, profiled: true)
+        tracker.didFinishLaunching(at: ms(300))
+        // iOS 13+ UIScene / SwiftUI apps fire willEnterForegroundNotification during cold launch:
+        tracker.willEnterForeground(at: ms(350))
+        tracker.didBecomeActive(at: ms(400))
+        tracker.firstFrame(at: ms(500), screen: "Home")
+
+        XCTAssertEqual(abandoned, 0)
+        XCTAssertEqual(reported?.type, .cold)
+        XCTAssertEqual(reported?.profiled, true)
+        XCTAssertEqual(reported?.durationMs, 500)
+    }
+
+    func testDelayedWillEnterForegroundAfterSilentBackgroundLaunchDowngradesToWarm() {
+        var reported: AppStartRecord?
+        var abandoned = 0
+        let tracker = AppStartTracker(
+            processStartNs: ms(0),
+            preMainEndNs: ms(100),
+            onReport: { reported = $0 },
+            onColdAbandoned: { abandoned += 1 }
+        )
+
+        tracker.configured(at: ms(200), context: .foreground, profiled: true)
+        tracker.didFinishLaunching(at: ms(300))
+        // App stayed in background (no didBecomeActive) for > 3s, confirmed background launch:
+        tracker.confirmBackgroundLaunchIfNotActive()
+        XCTAssertEqual(abandoned, 1)
+
+        // Later user opened it at 15s:
+        tracker.willEnterForeground(at: ms(15_000))
+        tracker.didBecomeActive(at: ms(15_150))
+        tracker.firstFrame(at: ms(15_280), screen: "Home")
+
+        XCTAssertEqual(reported?.type, .warm)
+        XCTAssertEqual(reported?.profiled, false)
+        XCTAssertEqual(reported?.durationMs, 280)
+    }
+
+    func testDebuggerAttachedAllowsUpTo30sLateConfigure() {
+        var reported: AppStartRecord?
+        let tracker = AppStartTracker(
+            processStartNs: ms(0),
+            preMainEndNs: ms(100),
+            isDebuggerAttached: true,
+            onReport: { reported = $0 },
+            onColdAbandoned: {}
+        )
+
+        tracker.configured(at: ms(18_000), context: .foreground, profiled: true)
+        tracker.didFinishLaunching(at: ms(18_100))
+        tracker.didBecomeActive(at: ms(18_200))
+        tracker.firstFrame(at: ms(18_300), screen: "Home")
+
+        XCTAssertEqual(reported?.type, .cold)
+        XCTAssertEqual(reported?.profiled, true)
     }
 }

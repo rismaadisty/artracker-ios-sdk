@@ -54,9 +54,10 @@ final class AppStartLifecycleTests: XCTestCase {
         let ctx2 = AppStartObserver.launchContext(appState: .inactive, environment: ["ActivePrewarm": "1"])
         XCTAssertEqual(ctx2, .prewarmed)
 
-        // Priority 3: .background
+        // Priority 3: .background at didFinishLaunching maps to .foreground
+        // (iOS 13+ reports .background before first window/scene activates on cold launch)
         let ctx3 = AppStartObserver.launchContext(appState: .background, environment: [:])
-        XCTAssertEqual(ctx3, .background)
+        XCTAssertEqual(ctx3, .foreground)
 
         // Priority 4: foreground (inactive with no prewarm)
         let ctx4 = AppStartObserver.launchContext(appState: .inactive, environment: [:])
