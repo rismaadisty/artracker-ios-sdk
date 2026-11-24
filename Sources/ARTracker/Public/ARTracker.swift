@@ -1,4 +1,5 @@
 import Foundation
+import ARTrackerNative
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -16,7 +17,18 @@ public final class ARTracker: @unchecked Sendable {
     private var _uploader: Uploader?
     private var _perfMonitor: PerfMonitor?
     private var _identity: IdentityController?
+    private var _appStartTracker: AppStartTracker?
+    #if canImport(UIKit)
+    private var _appStartObserver: AppStartObserver?
+    #endif
+    private var _profileStore: ProfileStore?
+    private var _profileUploader: ProfileUploader?
+    private var pendingItems: [Item] = []
     private var sessionStartUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+
+    internal var appStartTrackerForTesting: AppStartTracker? {
+        lock.withLock { _appStartTracker }
+    }
 
     private var currentDiskQueue: DiskQueue? { lock.withLock { _diskQueue } }
     private var currentUploader: Uploader? { lock.withLock { _uploader } }
@@ -77,6 +89,8 @@ public final class ARTracker: @unchecked Sendable {
         self._crashEngine = crashEngine
         self.sessionStartUptime = ProcessInfo.processInfo.systemUptime
 
+        startAppStartTracking(config: config)
+
         let identity = IdentityController(session: SessionManager.shared)
         lock.withLock {
             self._identity = identity
@@ -125,7 +139,7 @@ public final class ARTracker: @unchecked Sendable {
         LaunchMetrics.shared.markPhaseAEnd()
 
         // Transition to Fase B after first runloop cycle
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 self?.configurePhaseB()
             }
@@ -148,6 +162,7 @@ public final class ARTracker: @unchecked Sendable {
         lock.withLock {
             self._diskQueue = queue
         }
+        drainPendingItems(into: queue)
 
         // 3. Process Pending Crash Reports (PLCrashReporter)
         processPendingCrashReports(queue: queue)
@@ -191,6 +206,23 @@ public final class ARTracker: @unchecked Sendable {
             self._uploader = uploader
         }
         uploader.start()
+
+        // 8.0 Start Profile Uploader
+        let profileStore = lock.withLock { self._profileStore } ?? ProfileStore()
+        let profileUploader = ProfileUploader(
+            endpoint: endpoint,
+            appKey: appKey,
+            store: profileStore,
+            canUpload: { [weak self] in
+                guard let config = self?.lock.withLock({ self?._config }) else { return false }
+                return Reachability.shared.canUpload(wifiOnly: config.wifiOnly)
+            }
+        )
+        lock.withLock {
+            self._profileStore = profileStore
+            self._profileUploader = profileUploader
+        }
+        profileUploader.flush()
 
         // 8.1 Start Session Replay Engine if enabled
         if config.enableSessionReplay {
@@ -350,6 +382,7 @@ public final class ARTracker: @unchecked Sendable {
             if let http = response as? HTTPURLResponse {
                 if http.statusCode == 401 || http.statusCode == 403 {
                     uploader.disable()
+                    self.lock.withLock { self._profileUploader }?.disable()
                     Log.error("API Key validation failed (HTTP \(http.statusCode)). ARTracker disabled.")
                 } else if http.statusCode == 200 {
                     Log.info("API Key validated successfully.")
@@ -493,6 +526,7 @@ public final class ARTracker: @unchecked Sendable {
     public static func flush(completion: (@Sendable () -> Void)? = nil) {
         shared.currentPerfMonitor?.flush()
         ReplayEngine.shared.flush()
+        shared.lock.withLock { shared._profileUploader }?.flush()
         shared.currentUploader?.flush(completion: completion)
     }
 
@@ -511,6 +545,37 @@ public final class ARTracker: @unchecked Sendable {
 
     public func enqueueItem(_ item: Item) {
         _ = currentDiskQueue?.enqueue(item)
+    }
+
+    public func enqueueOrBuffer(_ item: Item) {
+        lock.withLock {
+            if let queue = _diskQueue {
+                _ = queue.enqueue(item)
+            } else {
+                if pendingItems.count >= 20 {
+                    pendingItems.removeFirst()
+                }
+                pendingItems.append(item)
+            }
+        }
+    }
+
+    internal func drainPendingItems(into queue: DiskQueue) {
+        let items: [Item] = lock.withLock {
+            let drained = pendingItems
+            pendingItems.removeAll()
+            return drained
+        }
+        for item in items {
+            _ = queue.enqueue(item)
+        }
+    }
+
+    internal func _testResetQueue() {
+        lock.withLock {
+            _diskQueue = nil
+            pendingItems.removeAll()
+        }
     }
 
     #if canImport(UIKit)
@@ -613,6 +678,7 @@ public final class ARTracker: @unchecked Sendable {
 
         TerminationDetector.shared.setInForeground(false)
         ReplayEngine.shared.flush()
+        lock.withLock { _profileUploader }?.flush()
         let uploader = currentUploader
         uploader?.suspendTimer()
         uploader?.flush()
@@ -681,4 +747,152 @@ extension ARTracker: SessionLifecycleListener {
         )
         enqueueItem(item)
     }
+}
+
+// MARK: - App Start Tracking & Startup Profiling
+
+extension ARTracker {
+    internal func startAppStartTracking(
+        config: ARTrackerConfig,
+        random: @escaping () -> Double = { Double.random(in: 0..<1) },
+        frameHook: FirstFrameHook? = nil,
+        profileStore: ProfileStore? = nil,
+        launchContext: LaunchContext? = nil,
+        processTimes: ProcessTimes? = nil
+    ) {
+        guard config.enableAppStartTracking else { return }
+
+        let times = processTimes ?? ProcessTimes.current()
+
+        #if canImport(UIKit)
+        let context = launchContext ?? AppStartObserver.launchContext(appState: UIApplication.shared.applicationState)
+        #else
+        let context = launchContext ?? .foreground
+        #endif
+
+        let isCold = (context == .foreground || context == .prewarmed)
+        let sampled = config.enableStartupProfiling && isCold && (random() < config.startupProfileSampleRate)
+
+        var sampler: StartupSampler?
+        var samplerStarted = false
+        if sampled {
+            if let s = StartupSampler(), s.start() {
+                sampler = s
+                samplerStarted = true
+            } else {
+                Log.warn("StartupSampler failed to initialize or start.")
+            }
+        }
+        let profiled = sampled && samplerStarted
+
+        Log.info("AppStart tracking configured (context: \(context), isCold: \(isCold), enableProfiling: \(config.enableStartupProfiling), sampleRate: \(config.startupProfileSampleRate), profiled: \(profiled), hasProcessStart: \(times.processStartNs != nil))")
+
+        let store = profileStore ?? lock.withLock { self._profileStore } ?? ProfileStore()
+        lock.withLock {
+            self._profileStore = store
+        }
+
+        let tracker = AppStartTracker(
+            processTimes: times,
+            isDebuggerAttached: DebuggerDetector.isAttached,
+            onReport: { [weak self] record in
+                sampler?.requestStop()
+
+                Log.info("AppStart reported (type: \(record.type.rawValue), durationMs: \(record.durationMs), profiled: \(record.profiled), startId: \(record.startId))")
+
+                let item = AppStartItem.make(record)
+                self?.enqueueOrBuffer(item)
+
+                if record.profiled, let s = sampler {
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        let raw = s.collect()
+                        let profile = StartupProfileBuilder.build(
+                            raw: raw,
+                            images: ImageTable.current(),
+                            anchorNs: record.anchorNs,
+                            startId: record.startId
+                        )
+                        let envelope = ProfileEnvelope(
+                            sdk: .current,
+                            context: ProfileContext(
+                                app_version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0",
+                                build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String,
+                                environment: config.environment
+                            ),
+                            profile: profile
+                        )
+                        do {
+                            let gzipData = try ProfileBody.gzip(envelope)
+                            try store.save(startId: record.startId, body: gzipData)
+                            Log.info("Startup profile saved (startId: \(record.startId), samples: \(profile.samples.count), bytes: \(gzipData.count))")
+                            self?.lock.withLock { self?._profileUploader }?.flush()
+                        } catch {
+                            Log.warn("Failed to save or gzip startup profile: \(error)")
+                        }
+                    }
+                }
+            },
+            onColdAbandoned: {
+                sampler?.requestStop()
+                DispatchQueue.global(qos: .utility).async {
+                    _ = sampler?.collect()
+                }
+            }
+        )
+
+        lock.withLock {
+            self._appStartTracker = tracker
+        }
+
+        #if canImport(UIKit)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                let observer = AppStartObserver(
+                    tracker: tracker,
+                    now: artn_now_ns,
+                    frameHook: frameHook ?? DisplayLinkFirstFrame()
+                )
+                observer.install()
+                lock.withLock {
+                    self._appStartObserver = observer
+                }
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                let observer = AppStartObserver(
+                    tracker: tracker,
+                    now: artn_now_ns,
+                    frameHook: frameHook ?? DisplayLinkFirstFrame()
+                )
+                observer.install()
+                self.lock.withLock {
+                    self._appStartObserver = observer
+                }
+            }
+        }
+        #endif
+
+        tracker.configured(at: artn_now_ns(), context: context, profiled: profiled)
+    }
+
+    #if canImport(UIKit)
+    internal func _testStartAppStartTracking(
+        config: ARTrackerConfig,
+        random: @escaping () -> Double = { Double.random(in: 0..<1) },
+        frameHook: FirstFrameHook? = nil,
+        profileStore: ProfileStore? = nil,
+        launchContext: LaunchContext? = nil,
+        processTimes: ProcessTimes? = nil
+    ) {
+        startAppStartTracking(
+            config: config,
+            random: random,
+            frameHook: frameHook,
+            profileStore: profileStore,
+            launchContext: launchContext,
+            processTimes: processTimes
+        )
+    }
+    #endif
 }

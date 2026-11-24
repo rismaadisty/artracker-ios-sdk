@@ -6,7 +6,7 @@ options:
 
 packages:
   ARTracker:
-    path: ../
+    path: ..
   Wormholy:
     url: https://github.com/Alfagift/Wormholy.git
     branch: enable-spm

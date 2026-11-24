@@ -18,8 +18,14 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ARTrackerNative",
+            path: "Sources/ARTrackerNative",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "ARTracker",
             dependencies: [
+                "ARTrackerNative",
                 .product(name: "CrashReporter", package: "plcrashreporter")
             ],
             path: "Sources/ARTracker",
@@ -29,7 +35,10 @@ let package = Package(
         ),
         .testTarget(
             name: "ARTrackerTests",
-            dependencies: ["ARTracker"],
+            dependencies: [
+                "ARTracker",
+                "ARTrackerNative"
+            ],
             path: "Tests/ARTrackerTests"
         ),
     ]

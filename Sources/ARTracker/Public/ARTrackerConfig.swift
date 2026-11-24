@@ -99,6 +99,15 @@ public struct ARTrackerConfig: Sendable {
     /// Idle time in seconds after which the next user activity or foreground return starts a new session. Minimum 1.0, default 1800.0 (30 minutes).
     public var sessionTimeout: TimeInterval
 
+    /// Automatically track app startup duration and phases (cold, warm, hot). Default: true.
+    public var enableAppStartTracking: Bool
+
+    /// Enable low-overhead main-thread stack sampling during cold app launch. Default: false.
+    public var enableStartupProfiling: Bool
+
+    /// Sample rate for startup profiling on cold launches from 0.0 to 1.0. Default: 0.1 (10%).
+    public var startupProfileSampleRate: Double
+
     internal static func normalizedSessionTimeout(_ value: TimeInterval) -> TimeInterval {
         guard value.isFinite else {
             Log.warn("sessionTimeout must be a finite number; using default 1800")
@@ -127,7 +136,10 @@ public struct ARTrackerConfig: Sendable {
         performanceSampleInterval: TimeInterval = 1.0,
         replayIdleAfter: TimeInterval = 30.0,
         replayDormantAfter: TimeInterval = 180.0,
-        sessionTimeout: TimeInterval = ARTrackerConfig.defaultSessionTimeout
+        sessionTimeout: TimeInterval = ARTrackerConfig.defaultSessionTimeout,
+        enableAppStartTracking: Bool = true,
+        enableStartupProfiling: Bool = false,
+        startupProfileSampleRate: Double = 0.1
     ) {
         self.environment = String(environment.prefix(64))
         self.appVersion = appVersion.map { String($0.prefix(64)) }
@@ -149,6 +161,9 @@ public struct ARTrackerConfig: Sendable {
         self.replayIdleAfter = max(5.0, replayIdleAfter)
         self.replayDormantAfter = replayDormantAfter > self.replayIdleAfter ? replayDormantAfter : self.replayIdleAfter + 1.0
         self.sessionTimeout = Self.normalizedSessionTimeout(sessionTimeout)
+        self.enableAppStartTracking = enableAppStartTracking
+        self.enableStartupProfiling = enableStartupProfiling
+        self.startupProfileSampleRate = max(0.0, min(startupProfileSampleRate, 1.0))
     }
 }
 

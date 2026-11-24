@@ -206,6 +206,10 @@ for dsym in "${DSYM_BUNDLES[@]}"; do
 
     if [[ "$HTTP_STATUS" =~ ^2 ]]; then
         echo "  ✅ Uploaded successfully (HTTP $HTTP_STATUS)"
+        RESP=$(cat "${TEMP_DIR}/response.txt" 2>/dev/null || echo "")
+        if [[ -n "$RESP" ]]; then
+            echo "  Response: $RESP"
+        fi
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
         echo "  ⚠️ Upload returned HTTP $HTTP_STATUS"
