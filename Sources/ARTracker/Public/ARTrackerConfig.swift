@@ -108,6 +108,12 @@ public struct ARTrackerConfig: Sendable {
     /// Sample rate for startup profiling on cold launches from 0.0 to 1.0. Default: 0.1 (10%).
     public var startupProfileSampleRate: Double
 
+    /// Share of sessions (0.0...1.0) recorded in full (FULL mode) and uploaded continuously. Default: 0.0.
+    public var replaySampleRate: Double
+
+    /// Share of remaining sessions (0.0...1.0) recorded in BUFFER mode (kept on device, uploaded only around errors/crashes). Default: 1.0.
+    public var replayOnErrorSampleRate: Double
+
     internal static func normalizedSessionTimeout(_ value: TimeInterval) -> TimeInterval {
         guard value.isFinite else {
             Log.warn("sessionTimeout must be a finite number; using default 1800")
@@ -139,7 +145,9 @@ public struct ARTrackerConfig: Sendable {
         sessionTimeout: TimeInterval = ARTrackerConfig.defaultSessionTimeout,
         enableAppStartTracking: Bool = true,
         enableStartupProfiling: Bool = false,
-        startupProfileSampleRate: Double = 0.1
+        startupProfileSampleRate: Double = 0.1,
+        replaySampleRate: Double = 0.0,
+        replayOnErrorSampleRate: Double = 1.0
     ) {
         self.environment = String(environment.prefix(64))
         self.appVersion = appVersion.map { String($0.prefix(64)) }
@@ -164,6 +172,8 @@ public struct ARTrackerConfig: Sendable {
         self.enableAppStartTracking = enableAppStartTracking
         self.enableStartupProfiling = enableStartupProfiling
         self.startupProfileSampleRate = max(0.0, min(startupProfileSampleRate, 1.0))
+        self.replaySampleRate = replaySampleRate.isFinite ? max(0.0, min(replaySampleRate, 1.0)) : 0.0
+        self.replayOnErrorSampleRate = replayOnErrorSampleRate.isFinite ? max(0.0, min(replayOnErrorSampleRate, 1.0)) : 1.0
     }
 }
 

@@ -2,6 +2,20 @@ import XCTest
 @testable import ARTracker
 
 final class ConfigTests: XCTestCase {
+    func testReplaySampleRateDefaultsToBufferModeAndClamps() {
+        let config = ARTrackerConfig()
+        XCTAssertEqual(config.replaySampleRate, 0.0)
+        XCTAssertEqual(config.replayOnErrorSampleRate, 1.0)
+
+        let clamped = ARTrackerConfig(replaySampleRate: -0.2, replayOnErrorSampleRate: 1.5)
+        XCTAssertEqual(clamped.replaySampleRate, 0.0)
+        XCTAssertEqual(clamped.replayOnErrorSampleRate, 1.0)
+
+        let nonFinite = ARTrackerConfig(replaySampleRate: .nan, replayOnErrorSampleRate: .infinity)
+        XCTAssertEqual(nonFinite.replaySampleRate, 0.0)
+        XCTAssertEqual(nonFinite.replayOnErrorSampleRate, 1.0)
+    }
+
     func testPerformanceConfigDefaultsAndClamping() {
         let defaultConfig = ARTrackerConfig()
         XCTAssertFalse(defaultConfig.enablePerformanceMonitoring)
