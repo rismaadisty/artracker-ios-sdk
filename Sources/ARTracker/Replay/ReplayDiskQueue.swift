@@ -306,6 +306,22 @@ public final class ReplayDiskQueue: @unchecked Sendable {
         }
     }
 
+    public func syncSequence(sessionId: String, nextSeq: Int) {
+        lock.withLock {
+            if var state = sessionSeqState[sessionId] {
+                state.nextSeq = max(state.nextSeq, nextSeq)
+                sessionSeqState[sessionId] = state
+                saveSessionSeqStateLocked()
+            }
+        }
+    }
+
+    public func nextSequence(sessionId: String) -> Int? {
+        lock.withLock {
+            sessionSeqState[sessionId]?.nextSeq
+        }
+    }
+
     public func promoteHeldBefore(_ cutoff: Date) -> Int {
         lock.withLock {
             guard let files = listChunkFilesLocked() else { return 0 }
