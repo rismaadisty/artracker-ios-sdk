@@ -360,4 +360,84 @@ final class ReplayBufferModeTests: XCTestCase {
         XCTAssertEqual(spy.ackedChunks.count, 1)
         XCTAssertEqual(spy.ackedChunks[0].sessionId, "ses_prev")
     }
+
+    func testCleanRelaunchDropsPreviousBufferChunks() {
+        let processStartDate = Date()
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        let oldItem = ReplayQueueItem(
+            id: "prev_clean_chunk",
+            seq: -1,
+            format: "artracker-screen-v1",
+            count: 1,
+            duration: 5000.0,
+            hasError: false,
+            hasRage: false,
+            startTime: "2026-11-24T00:00:00.000Z",
+            createdAt: processStartDate.addingTimeInterval(-10),
+            data: try! Gzip.compress(data: JSONEncoder().encode(ScreenChunkPayload(seq: -1, frames: [], touches: []))),
+            sessionId: "ses_clean",
+            held: true,
+            firstTsMs: 1000,
+            lastTsMs: 6000
+        )
+        queue.enqueue(oldItem)
+
+        let spy = SpyReplayUploader()
+        let manager = ReplayChunkManager(
+            uploader: spy,
+            environment: "test",
+            diskQueue: queue,
+            sessionIdProvider: { "ses_clean_new" }
+        )
+
+        // Relaunch clean (no crash)
+        manager.handlePreviousRunHoldings(previousRunCrashed: false, processStartDate: processStartDate)
+
+        let exp = expectation(description: "clean flush")
+        manager.flush { exp.fulfill() }
+        wait(for: [exp], timeout: 5.0)
+
+        XCTAssertEqual(spy.ackedChunks.count, 0)
+        XCTAssertEqual(queue.pendingCount(), 0)
+    }
+
+    #if canImport(UIKit)
+    func testReplayEngineSessionModeEvaluation() {
+        let queue = ReplayDiskQueue(customDirectory: tempDir)
+
+        // 1. Full mode sampler
+        ReplayEngine.shared.startForTesting(
+            uploader: ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "k"),
+            diskQueue: queue,
+            sampleRate: 1.0,
+            onErrorSampleRate: 0.0,
+            clock: { 0 }
+        )
+        XCTAssertEqual(ReplayEngine.shared.currentModeForTesting, .full)
+        ReplayEngine.shared.resetForTesting()
+
+        // 2. Buffer mode sampler (default: sampleRate 0.0, onError 1.0)
+        ReplayEngine.shared.startForTesting(
+            uploader: ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "k"),
+            diskQueue: queue,
+            sampleRate: 0.0,
+            onErrorSampleRate: 1.0,
+            clock: { 0 }
+        )
+        XCTAssertEqual(ReplayEngine.shared.currentModeForTesting, .buffer)
+        ReplayEngine.shared.resetForTesting()
+
+        // 3. Not sampled (both 0.0)
+        ReplayEngine.shared.startForTesting(
+            uploader: ReplayUploader(endpoint: URL(string: "https://example.com")!, appKey: "k"),
+            diskQueue: queue,
+            sampleRate: 0.0,
+            onErrorSampleRate: 0.0,
+            clock: { 0 }
+        )
+        XCTAssertNil(ReplayEngine.shared.currentModeForTesting)
+        ReplayEngine.shared.resetForTesting()
+    }
+    #endif
 }

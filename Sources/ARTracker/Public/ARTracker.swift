@@ -35,6 +35,7 @@ public final class ARTracker: @unchecked Sendable {
     private var currentPerfMonitor: PerfMonitor? { lock.withLock { _perfMonitor } }
     private var currentIdentity: IdentityController? { lock.withLock { _identity } }
     private var hasEmittedInitialSessionStart: Bool = false
+    private let processStartDate: Date = Date()
 
     public static var isInstalled: Bool {
         shared.lock.withLock { shared._isInstalled }
@@ -165,11 +166,13 @@ public final class ARTracker: @unchecked Sendable {
         drainPendingItems(into: queue)
 
         // 3. Process Pending Crash Reports (PLCrashReporter)
-        processPendingCrashReports(queue: queue)
+        let recoveredCrashes = processPendingCrashReports(queue: queue)
 
         // 4. Foreground OOM Detection (GAP-02)
-        checkAbnormalTermination(queue: queue, config: config)
+        let abnormalExit = checkAbnormalTermination(queue: queue, config: config)
         TerminationDetector.shared.markStarted()
+
+        let previousRunCrashed = (recoveredCrashes > 0) || abnormalExit
 
         // 5. Reachability & MetricKit (GAP-01)
         Reachability.shared.start()
@@ -235,8 +238,16 @@ public final class ARTracker: @unchecked Sendable {
                 quality: config.replayQuality,
                 fps: config.replayFramesPerSecond,
                 idleAfterMs: Int64(config.replayIdleAfter * 1000.0),
-                dormantAfterMs: Int64(config.replayDormantAfter * 1000.0)
+                dormantAfterMs: Int64(config.replayDormantAfter * 1000.0),
+                sampleRate: config.replaySampleRate,
+                onErrorSampleRate: config.replayOnErrorSampleRate
             )
+            ReplayEngine.shared.handlePreviousRunHoldings(
+                previousRunCrashed: previousRunCrashed,
+                processStartDate: processStartDate
+            )
+        } else {
+            ReplayDiskQueue().dropHeldBefore(processStartDate)
         }
 
         // 8.2 Start Performance Monitor if enabled
@@ -258,9 +269,10 @@ public final class ARTracker: @unchecked Sendable {
         Log.info("ARTracker Phase B completed. SDK active.")
     }
 
-    private func checkAbnormalTermination(queue: DiskQueue, config: ARTrackerConfig) {
+    @discardableResult
+    private func checkAbnormalTermination(queue: DiskQueue, config: ARTrackerConfig) -> Bool {
         guard let engine = _crashEngine, engine.pendingReportCount() == 0 else {
-            return
+            return false
         }
 
         if TerminationDetector.shared.didAbnormallyTerminateInForeground() {
@@ -295,13 +307,16 @@ public final class ARTracker: @unchecked Sendable {
             )
             _ = queue.enqueue(oomItem)
             Log.warn("Detected previous abnormal foreground termination (OOM). Queued telemetry.")
+            return true
         }
+        return false
     }
 
-    private func processPendingCrashReports(queue: DiskQueue) {
-        guard let engine = _crashEngine else { return }
+    @discardableResult
+    private func processPendingCrashReports(queue: DiskQueue) -> Int {
+        guard let engine = _crashEngine else { return 0 }
         let count = engine.pendingReportCount()
-        guard count > 0 else { return }
+        guard count > 0 else { return 0 }
 
         do {
             let reports = try engine.readPendingReports()
@@ -358,8 +373,10 @@ public final class ARTracker: @unchecked Sendable {
             try engine.purge()
             CrashContextStore.shared.purgePreviousContext()
             Log.info("Processed and purged \(reports.count) pending crash report(s).")
+            return reports.count
         } catch {
             Log.error("Error processing pending crash reports: \(error.localizedDescription)")
+            return 0
         }
     }
 
@@ -383,6 +400,7 @@ public final class ARTracker: @unchecked Sendable {
                 if http.statusCode == 401 || http.statusCode == 403 {
                     uploader.disable()
                     self.lock.withLock { self._profileUploader }?.disable()
+                    ReplayEngine.shared.disableAndClear()
                     Log.error("API Key validation failed (HTTP \(http.statusCode)). ARTracker disabled.")
                 } else if http.statusCode == 200 {
                     Log.info("API Key validated successfully.")
@@ -510,7 +528,7 @@ public final class ARTracker: @unchecked Sendable {
         }
 
         let msg = message ?? error.localizedDescription
-        ReplayEngine.shared.markError()
+        ReplayEngine.shared.onError()
         let item = Item(
             type: .log,
             name: "error",
@@ -544,6 +562,18 @@ public final class ARTracker: @unchecked Sendable {
     }
 
     public func enqueueItem(_ item: Item) {
+        if item.level == .error || item.level == .fatal {
+            // Check if item was created in current process
+            let isCurrentProcess: Bool
+            if let itemDate = ISO8601DateFormatter().date(from: item.timestamp) {
+                isCurrentProcess = itemDate >= processStartDate
+            } else {
+                isCurrentProcess = true
+            }
+            if isCurrentProcess {
+                ReplayEngine.shared.onError()
+            }
+        }
         _ = currentDiskQueue?.enqueue(item)
     }
 

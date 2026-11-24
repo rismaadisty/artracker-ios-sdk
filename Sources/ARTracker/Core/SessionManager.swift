@@ -7,6 +7,7 @@ internal protocol SessionLifecycleListener: AnyObject, Sendable {
 
 public final class SessionManager: @unchecked Sendable {
     public static let shared = SessionManager()
+    public static let sessionDidRotateNotification = Notification.Name("com.artracker.session.didRotate")
 
     private let lock = UnfairLock()
     private let clock: @Sendable () -> TimeInterval
@@ -146,6 +147,7 @@ public final class SessionManager: @unchecked Sendable {
         }
         if let start = startToNotify {
             listener?.sessionDidStart(id: start)
+            NotificationCenter.default.post(name: Self.sessionDidRotateNotification, object: nil, userInfo: ["sessionId": start])
         }
         return id
     }
@@ -186,6 +188,7 @@ public final class SessionManager: @unchecked Sendable {
         }
         if let start = startToNotify {
             listener?.sessionDidStart(id: start)
+            NotificationCenter.default.post(name: Self.sessionDidRotateNotification, object: nil, userInfo: ["sessionId": start])
         }
     }
 
@@ -227,6 +230,7 @@ public final class SessionManager: @unchecked Sendable {
         }
         if let start = startToNotify {
             listener?.sessionDidStart(id: start)
+            NotificationCenter.default.post(name: Self.sessionDidRotateNotification, object: nil, userInfo: ["sessionId": start])
         }
     }
 
@@ -283,6 +287,7 @@ public final class SessionManager: @unchecked Sendable {
         }
         if let start = startToNotify {
             listener?.sessionDidStart(id: start)
+            NotificationCenter.default.post(name: Self.sessionDidRotateNotification, object: nil, userInfo: ["sessionId": start])
         }
         return id
     }
