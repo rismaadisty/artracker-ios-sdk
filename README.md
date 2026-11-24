@@ -143,6 +143,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 | `debugLogging` | `Bool` | `false` | Menampilkan log internal SDK via OSLog di console debugger. |
 | `enablePerformanceMonitoring` | `Bool` | `false` | Mengaktifkan sampling performa foreground (CPU, RAM, FPS, jank, threads, thermal). |
 | `performanceSampleInterval` | `TimeInterval` | `1.0` | Interval sampling performa dalam detik (di-clamp `0.5...10.0`). |
+| `replaySampleRate` | `Double` | `0.0` | Rasio sesi normal yang direkam dalam mode `FULL` (0%..100%). Default `0.0` (hemat data kuota penuh). |
+| `replayOnErrorSampleRate` | `Double` | `1.0` | Rasio sesi buffer yang dipromosikan & diunggah saat mengalami error/crash (default 100%). |
 | `enableAppStartTracking` | `Bool` | `true` | Melacak durasi dan rincian fase start aplikasi (`cold`, `warm`, `hot`). |
 | `enableStartupProfiling` | `Bool` | `false` | Mengaktifkan Mach stack sampling thread utama beroverhead rendah saat cold start. |
 | `startupProfileSampleRate` | `Double` | `0.1` | Rasio sampling startup profiling saat cold launch (`0.0...1.0`, default 10%). |
@@ -172,6 +174,13 @@ Pada UIKit, Anda dapat menyamarkan view kustom dengan identifier `mask:view`:
 ```swift
 textField.accessibilityIdentifier = "mask:view"
 ```
+
+#### Error-Triggered Session Replay (Buffer Mode) & Data Savings
+Secara default, Session Replay beroperasi dalam **Buffer Mode** (`replaySampleRate: 0.0`, `replayOnErrorSampleRate: 1.0`):
+* **Sesi Sehat (Tanpa Error)**: Merekam tangkapan layar ke rolling buffer lokal berdurasi ~60 detik (maksimum 13 chunks @ 5 detik) di cache perangkat dan **mengunggah 0 bytes** ke server (penghematan data 100%). Buffer dihapus secara otomatis saat rotasi sesi atau aplikasi ditutup normal.
+* **Sesi dengan Error / Crash**: Ketika terjadi `ARTracker.capture(error:)`, log `.error` / `.fatal`, fatal crash `PLCrashReporter`, atau crash/OOM exit sebelumnya, SDK secara instan mempromosikan buffer 60 detik sebelum error menjadi siap kirim dan membuka follow-up window 30 detik untuk menangkap konteks pasca-error.
+* **Rate Limiting**: Maksimal 3 promosi per sesi dengan jeda minimal 60 detik antar pemicu.
+* **Full Replay**: Jika Anda ingin merekam seluruh sesi tanpa menunggu error, atur `replaySampleRate` (misal `0.1` untuk sampling 10% atau `1.0` untuk merekam 100% sesi penuh).
 
 ### 2. Pencatatan Breadcrumbs & User Identity
 

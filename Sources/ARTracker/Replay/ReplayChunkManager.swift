@@ -3,10 +3,13 @@ import Foundation
 import UIKit
 #endif
 
-/// Manages buffering of ScreenFramePayload and ScreenTouchPoint, 10s rotation,
+/// Manages buffering of ScreenFramePayload and ScreenTouchPoint, adaptive rotation (10s full / 5s buffer),
 /// Gzip compression, persistent disk queue in Caches, and uploading to backend / R2.
 public final class ReplayChunkManager: @unchecked Sendable {
     public static let maxChunkBytes: Int = 2 * 1024 * 1024
+    public static let fullWindowSeconds: TimeInterval = 10.0
+    public static let bufferWindowSeconds: TimeInterval = 5.0
+    public static let followUpSeconds: TimeInterval = 30.0
 
     private let lock = UnfairLock()
     private let uploader: any ReplayUploading
@@ -16,6 +19,12 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private let sessionIdProvider: @Sendable () -> String
     private let userIdProvider: @Sendable () -> String?
     private let workerQueue = DispatchQueue(label: "com.artracker.replay.worker", qos: .utility)
+
+    // Mode & Follow-up State
+    private var recordingMode: ReplayRecordingMode = .full
+    private var followUpUntilUptime: TimeInterval? = nil
+    private var followUpEndTimer: DispatchSourceTimer? = nil
+    private let errorPolicy = ErrorTriggerPolicy()
 
     // Shared monotonic sequence counter
     private var currentChunkSeq: Int = 0
@@ -27,6 +36,9 @@ public final class ReplayChunkManager: @unchecked Sendable {
     private var activeSessionId: String? = nil
     private var currentChunkSessionId: String? = nil
     private var currentChunkUserId: String? = nil
+
+    private var firstEventTsMs: Int64? = nil
+    private var lastEventTsMs: Int64? = nil
 
     private let uptimeProvider: @Sendable () -> TimeInterval
     private let dateProvider: @Sendable () -> Date
@@ -69,15 +81,124 @@ public final class ReplayChunkManager: @unchecked Sendable {
         processPendingUploads(completion: nil)
     }
 
-    public func markError() {
+    public func setRecordingMode(_ mode: ReplayRecordingMode, sessionId: String) {
+        var shouldPromote = false
+        var sessionToDrop: String? = nil
+
         lock.withLock {
-            self.hasError = true
+            let oldSessionId = activeSessionId ?? sessionIdProvider()
+            let oldMode = recordingMode
+
+            if oldSessionId != sessionId || oldMode != mode {
+                triggerFlushLocked()
+            }
+
+            if oldMode == .buffer && oldSessionId != sessionId {
+                sessionToDrop = oldSessionId
+            } else if oldMode == .buffer && mode == .full && oldSessionId == sessionId {
+                shouldPromote = true
+            }
+
+            followUpUntilUptime = nil
+            followUpEndTimer?.cancel()
+            followUpEndTimer = nil
+            recordingMode = mode
+            activeSessionId = sessionId
+        }
+
+        if let dropId = sessionToDrop {
+            diskQueue.dropHeld(sessionId: dropId)
+        }
+        if shouldPromote {
+            _ = diskQueue.promote(sessionId: sessionId)
+            processPendingUploads(completion: nil)
+        }
+
+        workerQueue.async { [weak self] in
+            self?.restartFlushTimer()
+        }
+    }
+
+    public func discardHeld(sessionId: String) {
+        workerQueue.async { [weak self] in
+            self?.diskQueue.dropHeld(sessionId: sessionId)
+        }
+    }
+
+    public func markError() {
+        onError()
+    }
+
+    public func onError() {
+        var admitted = false
+        var targetSession = ""
+
+        lock.withLock {
+            hasError = true
+            let currentSession = currentChunkSessionId ?? activeSessionId ?? sessionIdProvider()
+            targetSession = currentSession
+            let nowMs = Int64(uptimeProvider() * 1000.0)
+
+            if recordingMode == .buffer {
+                if errorPolicy.admit(sessionId: currentSession, nowMs: nowMs) {
+                    admitted = true
+                    // Flush current buffer with hasError = true
+                    triggerFlushLocked()
+
+                    let followUpUntil = uptimeProvider() + Self.followUpSeconds
+                    followUpUntilUptime = followUpUntil
+
+                    followUpEndTimer?.cancel()
+                    let timer = DispatchSource.makeTimerSource(queue: workerQueue)
+                    timer.schedule(deadline: .now() + Self.followUpSeconds)
+                    timer.setEventHandler { [weak self] in
+                        self?.lock.withLock {
+                            self?.followUpUntilUptime = nil
+                            self?.triggerFlushLocked()
+                        }
+                        self?.processPendingUploads(completion: nil)
+                        self?.followUpEndTimer = nil
+                    }
+                    timer.resume()
+                    followUpEndTimer = timer
+                }
+            }
+        }
+
+        if admitted {
+            _ = diskQueue.promote(sessionId: targetSession)
+            lock.withLock {
+                if let next = diskQueue.nextSequence(sessionId: targetSession) {
+                    currentChunkSeq = next
+                }
+            }
+            processPendingUploads(completion: nil)
         }
     }
 
     public func markRageClick() {
         lock.withLock {
             self.hasRageClick = true
+        }
+    }
+
+    public func handlePreviousRunHoldings(previousRunCrashed: Bool, processStartDate: Date) {
+        workerQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.isScreenshotDisabled {
+                self.diskQueue.dropHeldBefore(processStartDate)
+                return
+            }
+
+            if previousRunCrashed {
+                let count = self.diskQueue.promoteHeldBefore(processStartDate)
+                if count > 0 {
+                    Log.debug("Replay buffer promoted after crash: \(count) chunks")
+                    self.processPendingUploads(completion: nil)
+                }
+            } else {
+                _ = self.diskQueue.dropHeldBefore(processStartDate)
+            }
         }
     }
 
@@ -98,6 +219,8 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 sessionStartTime = dateProvider()
             }
             lastEventUptime = nil
+            firstEventTsMs = nil
+            lastEventTsMs = nil
         }
         if currentChunkSessionId == nil {
             currentChunkSessionId = currentSession
@@ -115,9 +238,16 @@ public final class ReplayChunkManager: @unchecked Sendable {
             prepareSessionLocked(currentSession, currentUser)
             lastEventUptime = uptimeProvider()
 
+            if firstEventTsMs == nil {
+                firstEventTsMs = frame.ts
+            }
+            lastEventTsMs = frame.ts
+
             let frameBytes = frame.data.utf8.count
             if !screenFrameBuffer.isEmpty && (currentBufferBytes + frameBytes > Self.maxChunkBytes) {
                 triggerFlushLocked()
+                firstEventTsMs = frame.ts
+                lastEventTsMs = frame.ts
             }
 
             screenFrameBuffer.append(frame)
@@ -136,6 +266,12 @@ public final class ReplayChunkManager: @unchecked Sendable {
             let currentUser = userIdProvider()
             prepareSessionLocked(currentSession, currentUser)
             lastEventUptime = uptimeProvider()
+
+            if firstEventTsMs == nil {
+                firstEventTsMs = touch.ts
+            }
+            lastEventTsMs = touch.ts
+
             screenTouchBuffer.append(touch)
             if screenFrameBuffer.count >= 20 || screenTouchBuffer.count >= 200 {
                 triggerFlushLocked()
@@ -149,6 +285,20 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 completion?()
                 return
             }
+            self.lock.withLock {
+                self.triggerFlushLocked()
+            }
+            self.processPendingUploads(completion: completion)
+        }
+    }
+
+    public func handleDidEnterBackground(completion: (@Sendable () -> Void)? = nil) {
+        workerQueue.async { [weak self] in
+            guard let self = self else {
+                completion?()
+                return
+            }
+            self.pauseFlushTimer()
             self.lock.withLock {
                 self.triggerFlushLocked()
             }
@@ -176,6 +326,12 @@ public final class ReplayChunkManager: @unchecked Sendable {
         }
     }
 
+    private func restartFlushTimer() {
+        flushTimer?.cancel()
+        flushTimer = nil
+        startFlushTimer()
+    }
+
     public func scheduleOneShotFlush(after seconds: TimeInterval) {
         workerQueue.async { [weak self] in
             guard let self = self else { return }
@@ -196,8 +352,11 @@ public final class ReplayChunkManager: @unchecked Sendable {
     }
 
     private func startFlushTimer() {
+        let interval = lock.withLock {
+            recordingMode == .buffer ? Self.bufferWindowSeconds : Self.fullWindowSeconds
+        }
         let timer = DispatchSource.makeTimerSource(queue: workerQueue)
-        timer.schedule(deadline: .now() + 10.0, repeating: 10.0)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
         timer.setEventHandler { [weak self] in
             self?.lock.withLock {
                 self?.triggerFlushLocked()
@@ -206,6 +365,19 @@ public final class ReplayChunkManager: @unchecked Sendable {
         }
         timer.resume()
         self.flushTimer = timer
+    }
+
+    private func isCurrentChunkHeldLocked(nowUptime: TimeInterval) -> Bool {
+        guard recordingMode == .buffer else { return false }
+        if let until = followUpUntilUptime {
+            if nowUptime < until {
+                return false
+            } else {
+                followUpUntilUptime = nil
+                return true
+            }
+        }
+        return true
     }
 
     private func triggerFlushLocked(overrideEndUptime: TimeInterval? = nil) {
@@ -239,8 +411,16 @@ public final class ReplayChunkManager: @unchecked Sendable {
         hasError = false
         hasRageClick = false
 
-        let seq = currentChunkSeq
-        currentChunkSeq += 1
+        let held = isCurrentChunkHeldLocked(nowUptime: nowUptime)
+        let seq = held ? -1 : currentChunkSeq
+        if !held {
+            currentChunkSeq += 1
+        }
+
+        let firstTs = firstEventTsMs ?? Int64(sessionStartTime.timeIntervalSince1970 * 1000.0)
+        let lastTs = lastEventTsMs ?? Int64(dateProvider().timeIntervalSince1970 * 1000.0)
+        firstEventTsMs = nil
+        lastEventTsMs = nil
 
         let payload = ScreenChunkPayload(
             format: "artracker-screen-v1",
@@ -263,7 +443,10 @@ public final class ReplayChunkManager: @unchecked Sendable {
                 startTime: sTime,
                 data: gzipped,
                 sessionId: chunkSession,
-                userId: chunkUser
+                userId: chunkUser,
+                held: held,
+                firstTsMs: firstTs,
+                lastTsMs: lastTs
             )
             diskQueue.enqueue(item)
 
@@ -393,5 +576,7 @@ public final class ReplayChunkManager: @unchecked Sendable {
 
     deinit {
         flushTimer?.cancel()
+        followUpEndTimer?.cancel()
+        oneShotFlushTimer?.cancel()
     }
 }

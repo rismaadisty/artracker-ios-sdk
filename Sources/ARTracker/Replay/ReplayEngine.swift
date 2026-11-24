@@ -12,6 +12,13 @@ public final class ReplayEngine: @unchecked Sendable {
     private var chunkManager: ReplayChunkManager?
     private var isStarted: Bool = false
     private var maskAllText: Bool = false
+    private var replaySampleRate: Double = 0.0
+    private var replayOnErrorSampleRate: Double = 1.0
+    private var replaySampler: @Sendable (String, Double) -> Bool = { ReplaySampling.isSampled(sessionId: $0, rate: $1) }
+    private var isManualOverride: Bool = false
+    private var currentMode: ReplayRecordingMode? = nil
+    private var currentSessionId: String? = nil
+    private var sessionObserverToken: NSObjectProtocol? = nil
 
     #if canImport(UIKit)
     @MainActor private var screenCapturer: ScreenCapturer?
@@ -39,7 +46,10 @@ public final class ReplayEngine: @unchecked Sendable {
         quality: ReplayQuality = .standard,
         fps: Double = 2.0,
         idleAfterMs: Int64 = 30_000,
-        dormantAfterMs: Int64 = 180_000
+        dormantAfterMs: Int64 = 180_000,
+        sampleRate: Double = 0.0,
+        onErrorSampleRate: Double = 1.0,
+        sampler: @escaping @Sendable (String, Double) -> Bool = { ReplaySampling.isSampled(sessionId: $0, rate: $1) }
     ) {
         let uploader = ReplayUploader(endpoint: endpoint, appKey: appKey)
         let diskQueue = ReplayDiskQueue()
@@ -58,6 +68,9 @@ public final class ReplayEngine: @unchecked Sendable {
             fps: fps,
             idleAfterMs: idleAfterMs,
             dormantAfterMs: dormantAfterMs,
+            sampleRate: sampleRate,
+            onErrorSampleRate: onErrorSampleRate,
+            sampler: sampler,
             clock: { Int64(Date().timeIntervalSince1970 * 1000) }
         )
     }
@@ -71,6 +84,9 @@ public final class ReplayEngine: @unchecked Sendable {
         fps: Double = 2.0,
         idleAfterMs: Int64 = 30_000,
         dormantAfterMs: Int64 = 180_000,
+        sampleRate: Double = 0.0,
+        onErrorSampleRate: Double = 1.0,
+        sampler: @escaping @Sendable (String, Double) -> Bool = { ReplaySampling.isSampled(sessionId: $0, rate: $1) },
         clock: @escaping @Sendable () -> Int64,
         windowProvider: (() -> [UIWindow])? = nil,
         isAppActive: (() -> Bool)? = nil
@@ -80,6 +96,19 @@ public final class ReplayEngine: @unchecked Sendable {
             isStarted = true
             self.maskAllText = maskAllText
             self.chunkManager = chunkManager
+            self.replaySampleRate = sampleRate
+            self.replayOnErrorSampleRate = onErrorSampleRate
+            self.replaySampler = sampler
+        }
+
+        evaluateSessionMode()
+
+        sessionObserverToken = NotificationCenter.default.addObserver(
+            forName: SessionManager.sessionDidRotateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.evaluateSessionMode()
         }
 
         chunkManager.onScreenshotDisabled = { [weak self] in
@@ -167,6 +196,9 @@ public final class ReplayEngine: @unchecked Sendable {
         fps: Double = 2.0,
         idleAfterMs: Int64 = 30_000,
         dormantAfterMs: Int64 = 180_000,
+        sampleRate: Double = 0.0,
+        onErrorSampleRate: Double = 1.0,
+        sampler: @escaping @Sendable (String, Double) -> Bool = { ReplaySampling.isSampled(sessionId: $0, rate: $1) },
         clock: @escaping @Sendable () -> Int64
     ) {
         lock.withLock {
@@ -174,17 +206,82 @@ public final class ReplayEngine: @unchecked Sendable {
             isStarted = true
             self.maskAllText = maskAllText
             self.chunkManager = chunkManager
+            self.replaySampleRate = sampleRate
+            self.replayOnErrorSampleRate = onErrorSampleRate
+            self.replaySampler = sampler
         }
+        evaluateSessionMode()
     }
     #endif
 
-    public func markError() {
-        chunkManager?.markError()
+    public func evaluateSessionMode() {
+        let sessId = SessionManager.shared.sessionId
+        let (mode, oldSess) = lock.withLock { () -> (ReplayRecordingMode?, String?) in
+            let old = self.currentSessionId
+            self.currentSessionId = sessId
+            let selected = ReplayRecordingMode.select(
+                sessionId: sessId,
+                manual: self.isManualOverride,
+                sampleRate: self.replaySampleRate,
+                onErrorSampleRate: self.replayOnErrorSampleRate,
+                sampler: self.replaySampler
+            )
+            self.currentMode = selected
+            return (selected, old)
+        }
+
+        if let selectedMode = mode {
+            chunkManager?.setRecordingMode(selectedMode, sessionId: sessId)
+            #if canImport(UIKit)
+            Task { @MainActor [weak self] in
+                let isCachedDisabled = (UserDefaults.standard.object(forKey: "artracker.replay.screenshot_enabled") as? Bool == false)
+                if !isCachedDisabled {
+                    self?.screenCapturer?.start()
+                }
+            }
+            #endif
+        } else {
+            // Not sampled
+            if let prev = oldSess, prev != sessId {
+                chunkManager?.discardHeld(sessionId: prev)
+            }
+            #if canImport(UIKit)
+            Task { @MainActor [weak self] in
+                self?.screenCapturer?.stop()
+            }
+            #endif
+            chunkManager?.pauseFlushTimer()
+        }
+    }
+
+    public func onError() {
+        chunkManager?.onError()
         #if canImport(UIKit)
         Task { @MainActor [weak self] in
             self?.trigger(.error)
         }
         #endif
+    }
+
+    public func markError() {
+        onError()
+    }
+
+    public func handlePreviousRunHoldings(previousRunCrashed: Bool, processStartDate: Date) {
+        chunkManager?.handlePreviousRunHoldings(previousRunCrashed: previousRunCrashed, processStartDate: processStartDate)
+    }
+
+    public func disableAndClear() {
+        lock.withLock {
+            isStarted = false
+        }
+        #if canImport(UIKit)
+        Task { @MainActor [weak self] in
+            self?.screenCapturer?.stop()
+        }
+        #endif
+        chunkManager?.pauseFlushTimer()
+        ReplayDiskQueue().clearAll()
     }
 
     public func flush(completion: (@Sendable () -> Void)? = nil) {
@@ -505,6 +602,12 @@ public final class ReplayEngine: @unchecked Sendable {
             pendingDebounceWorkItem?.cancel()
             pendingDebounceWorkItem = nil
             chunkManager = nil
+            currentMode = nil
+            currentSessionId = nil
+            if let token = sessionObserverToken {
+                NotificationCenter.default.removeObserver(token)
+                sessionObserverToken = nil
+            }
         }
         #if canImport(UIKit)
         MainActor.assumeIsolated {
@@ -539,6 +642,9 @@ public final class ReplayEngine: @unchecked Sendable {
         fps: Double = 2.0,
         idleAfterMs: Int64 = 30_000,
         dormantAfterMs: Int64 = 180_000,
+        sampleRate: Double = 0.0,
+        onErrorSampleRate: Double = 1.0,
+        sampler: @escaping @Sendable (String, Double) -> Bool = { ReplaySampling.isSampled(sessionId: $0, rate: $1) },
         clock: @escaping @Sendable () -> Int64,
         windowProvider: (() -> [UIWindow])? = nil,
         isAppActive: (() -> Bool)? = nil
@@ -557,10 +663,17 @@ public final class ReplayEngine: @unchecked Sendable {
             fps: fps,
             idleAfterMs: idleAfterMs,
             dormantAfterMs: dormantAfterMs,
+            sampleRate: sampleRate,
+            onErrorSampleRate: onErrorSampleRate,
+            sampler: sampler,
             clock: clock,
             windowProvider: windowProvider,
             isAppActive: isAppActive
         )
+    }
+
+    internal var currentModeForTesting: ReplayRecordingMode? {
+        lock.withLock { currentMode }
     }
 
     @MainActor
